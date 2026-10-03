@@ -21,14 +21,17 @@ namespace musa {
 
 struct Gemm {
   static String SelectInst(const GemmNode &op, int block_size, Target target) {
-    if (!op.annotations_.Get("is_sqmma")) {
-      LOG(FATAL) << "MUSA T.gemm instruction selection is not implemented; "
-                    "use T.sqmma_gemm to request MP31 SQMMA explicitly";
-    }
     if (TargetIsMP31(target)) {
+      // Plain T.gemm and the explicit T.sqmma_gemm share the MP31 SQMMA
+      // instruction selection.  Unsupported dtype/shape combinations fail
+      // inside SQMMA::SelectInst with a specific message.
       return mp31::SQMMA::SelectInst(op, block_size, target);
     }
-    LOG(FATAL) << "T.sqmma_gemm is only supported on MP31, target=" << target;
+    if (op.annotations_.Get("is_sqmma")) {
+      LOG(FATAL) << "T.sqmma_gemm is only supported on MP31, target=" << target;
+    }
+    LOG(FATAL) << "MUSA T.gemm instruction selection is not implemented for "
+                  "target=" << target;
     return {};
   }
 
