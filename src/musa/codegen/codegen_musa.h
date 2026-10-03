@@ -54,6 +54,8 @@ class CodeGenMUSA final : public CodeGenC {
   void PrintExtraAttrs(const PrimFunc& f, std::ostream& os) final;  // NOLINT(*)
   void VisitStmt_(const ForNode* op) final;
   void VisitStmt_(const EvaluateNode* op) final;
+  /*! \brief Whether an opaque extern call may write through an access ptr */
+  static bool CallExternWritesMemory(const CallNode* call);
   void PrintStorageSync(const CallNode* op) final;
   void PrintStorageScope(const std::string& scope, std::ostream& os) final;  // NOLINT(*)
   void PrintVecBinaryOp(const std::string& op, DataType t, PrimExpr lhs, PrimExpr rhs,

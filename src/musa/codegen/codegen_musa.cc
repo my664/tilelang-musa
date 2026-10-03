@@ -1155,8 +1155,27 @@ void CodeGenMUSA::VisitStmt_(const EvaluateNode* op) {
     stream << "device_assert_with_msg(" << condition << ", " << msg
            << ");\n";
   } else {
+    if (call && call->op.same_as(builtin::call_extern()) &&
+        CallExternWritesMemory(call)) {
+      // Opaque extern calls write shared/global memory through their
+      // tvm_access_ptr arguments.  Drop cached SSA loads so a later load of
+      // the same expression text cannot reuse a value captured before the
+      // call (e.g. in-place T.cumsum followed by a read of the same buffer).
+      InvalidateSSALoads();
+    }
     CodeGenC::VisitStmt_(op);
   }
+}
+
+bool CodeGenMUSA::CallExternWritesMemory(const CallNode* call) {
+  // Opaque extern calls receive raw buffer pointers (address_of /
+  // tvm_access_ptr) and carry no purity annotation, so any of them may write
+  // shared or global memory.  Staying conservative here only costs a few
+  // temporaries around extern calls; missing a write would silently reuse a
+  // stale SSA-cached load (e.g. in-place T.cumsum followed by a read of the
+  // same buffer).
+  (void)call;
+  return true;
 }
 
 void CodeGenMUSA::VisitExpr_(const CallNode* op, std::ostream& os) {
