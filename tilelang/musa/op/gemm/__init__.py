@@ -4,6 +4,7 @@ from tilelang.musa.target import target_is_mp31
 from tilelang.tileop.gemm.registry import register_gemm_impl
 
 from .mp31_sqmma import GEMM_INST_SQMMA, GemmMP31SQMMA
+from .planner import SqmmaConfig, recommend_sqmma_config
 
 
 def _match_mp31_sqmma(target) -> bool:
