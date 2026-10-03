@@ -70,3 +70,7 @@ companion repository:
 * `r1-lower-thread-allreduce-musa-candidate.patch`: allows MUSA in the shared
   warp-reduction pass. Found inert for TileLang reduce ops (they lower to
   `tl::AllReduce` templates directly), kept as a candidate.
+
+## Target warp-size normalization (local follow-up)
+
+The working tree also contains the fail-closed MP21/MP22/MP31 warp-size normalization in 	ilelang/musa/target.py and 	esting/python/target/test_tilelang_musa_target.py. The matching TVM target-kind patch is preserved at musa_patches/tvm-target-warp-size.patch; it must be applied inside 3rdparty/tvm before validating explicit MP21/MP22 targets. This follow-up has source-level regression coverage but no MP21/MP22 device result yet.

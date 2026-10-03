@@ -1,0 +1,39 @@
+diff --git a/src/target/target_kind.cc b/src/target/target_kind.cc
+index 043e3d5a2..074cec097 100644
+--- a/src/target/target_kind.cc
++++ b/src/target/target_kind.cc
+@@ -192,8 +192,9 @@ ffi::Map<ffi::String, ffi::Any> UpdateCUDAAttrs(ffi::Map<ffi::String, ffi::Any>
+  * \return The updated attributes
+  */
+ ffi::Map<ffi::String, ffi::Any> UpdateMUSAAttrs(ffi::Map<ffi::String, ffi::Any> target) {
++  ffi::String archStr;
+   if (target.count("arch")) {
+-    ffi::String archStr = Downcast<ffi::String>(target.at("arch"));
++    archStr = Downcast<ffi::String>(target.at("arch"));
+     TVM_FFI_CHECK(support::StartsWith(archStr, "mp_"), ValueError)
+         << "MUSA target gets an invalid arch: -arch=" << archStr;
+   } else {
+@@ -205,10 +206,19 @@ ffi::Map<ffi::String, ffi::Any> UpdateMUSAAttrs(ffi::Map<ffi::String, ffi::Any>
+     } else {
+       archInt = std::stod(version.cast<std::string>()) * 10 + 0.1;
+     }
+-    target.Set("arch", ffi::String("mp_") + std::to_string(archInt));
+-    if (archInt == 22) {
+-      target.Set("thread_warp_size", 128);
+-    }
++    archStr = ffi::String("mp_") + std::to_string(archInt);
++    target.Set("arch", archStr);
++  }
++  // Keep compiler-side warp reasoning aligned with the MUSA templates.  The
++  // target kind default is 32, which is wrong for explicit MP21/MP22 targets.
++  // Only architectures with a verified contract are accepted here.
++  if (archStr == "mp_21" || archStr == "mp_22") {
++    target.Set("thread_warp_size", 128);
++  } else if (archStr == "mp_31") {
++    target.Set("thread_warp_size", 32);
++  } else {
++    TVM_FFI_CHECK(false, ValueError)
++        << "MUSA target has no verified warp-size contract for -arch=" << archStr;
+   }
+   return target;
+ }

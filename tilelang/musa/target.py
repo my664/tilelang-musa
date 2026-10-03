@@ -35,6 +35,24 @@ def musa_arch_to_compute_version(arch: str | None) -> tuple[int, int] | None:
     return divmod(int(arch_value), 10)
 
 
+def musa_arch_to_warp_size(arch: str | None) -> int | None:
+    """Return the logical MUSA warp size encoded by an MP architecture.
+
+    MP21/MP22 use 128-lane warps in the MUSA templates.  The MP31 target uses
+    the 32-lane shuffle ABI.  Unknown architectures stay unresolved so target
+    normalization cannot invent a lowering contract.
+    """
+    compute_version = musa_arch_to_compute_version(arch)
+    if compute_version is None:
+        return None
+    major, minor = compute_version
+    if major == 2 and minor in (1, 2):
+        return 128
+    if (major, minor) == (3, 1):
+        return 32
+    return None
+
+
 def _detect_torch_musa_arch() -> str | None:
     """Return the architecture of the current torch MUSA device."""
     try:
@@ -81,6 +99,9 @@ def with_musa_target_attrs(target: Target) -> Target:
         return target
     target_dict = dict(target.export())
     target_dict["arch"] = arch
+    warp_size = musa_arch_to_warp_size(arch)
+    if warp_size is not None:
+        target_dict["thread_warp_size"] = warp_size
     return Target(target_dict)
 
 
