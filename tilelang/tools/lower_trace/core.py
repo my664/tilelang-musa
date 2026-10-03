@@ -137,6 +137,8 @@ _CODEGEN_FFI_NAMES: list[str] = [
     "target.build.tilelang_cutedsl_without_compile",
     "target.build.tilelang_hip",
     "target.build.tilelang_hip_without_compile",
+    "target.build.musa",
+    "target.build.musa_without_compile",
     "target.build.tilelang_metal",
     "target.build.tilelang_c",
     "target.build.tilelang_c_host",
@@ -172,6 +174,8 @@ _CODEGEN_FFI_NAMES: list[str] = [
 #   is consumed by the host runtime module tree).
 # - ``tilelang_cuda``, ``tilelang_hip``, ``tilelang_cutedsl`` (full-compile
 #   variants) produce binary modules consumed via ``import_module``.
+# - ``musa_without_compile`` returns a source module inspected by
+#   ``tilelang.engine.lower``; the full ``musa`` entry returns a binary module.
 # - ``tilelang_ascend`` and ``tilelang_ascend_pto`` are called from
 #   ``device_codegen`` (not ``device_codegen_without_compile``), but
 #   ``BuildTileLangAscend`` returns a ``CSourceModuleCreate(code, "c", ...)``
@@ -189,6 +193,7 @@ _SOURCE_ONLY_CODEGEN_FFIS: frozenset[str] = frozenset(
         "target.build.tilelang_cuda_without_compile",
         "target.build.tilelang_cutedsl_without_compile",
         "target.build.tilelang_hip_without_compile",
+        "target.build.musa_without_compile",
         "target.build.tilelang_c",
         "target.build.webgpu",
         "target.build.tilelang_cpp",

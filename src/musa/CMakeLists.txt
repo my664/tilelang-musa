@@ -1,6 +1,26 @@
-# MUSA target helpers are pure C++ registrations used by common TileLang code.
-# Keep them available even when the MUSA toolchain is disabled.
-list(APPEND TILE_LANG_SRCS src/musa/target_utils.cc)
+# MUSA lowering and source generation only depend on TVM/TileLang compiler
+# interfaces. Keep them available without a MUSA SDK so USE_MUSA=OFF builds can
+# still lower TileLang programs to inspectable MUSA C source.
+list(APPEND TILE_LANG_SRCS
+  src/musa/target_utils.cc
+  src/musa/codegen/codegen_musa.cc
+  src/musa/codegen/intrin_rule_musa.cc
+  src/musa/layout/mp31_sqmma_layouts.cc
+  src/musa/op/fast_divmod.cc
+  src/musa/op/atomic_add.cc
+  src/musa/op/atomic_reduce.cc
+  src/musa/op/copy.cc
+  src/musa/op/fill.cc
+  src/musa/op/finalize_reducer.cc
+  src/musa/op/gemm.cc
+  src/musa/op/gemm/mp31_sqmma.cc
+  src/musa/op/reduce.cc
+  src/musa/op/scan.cc
+  src/musa/op/transpose.cc
+  src/musa/transform/lower_ldg_stg.cc
+  src/musa/transform/lower_fast_divmod.cc
+  src/musa/transform/lower_tme.cc
+)
 
 if(NOT USE_MUSA)
   return()
@@ -62,23 +82,6 @@ if(TILELANG_USE_MUSA_STUBS)
       "libmusa.so.1;libmusa.so;libmusart.so.5;libmusart.so.4;libmusart.so")
 endif()
 
-list(APPEND TILE_LANG_SRCS
-  src/musa/codegen/codegen_musa.cc
-  src/musa/codegen/intrin_rule_musa.cc
-  src/musa/layout/mp31_sqmma_layouts.cc
-  src/musa/op/fast_divmod.cc
-  src/musa/op/atomic_add.cc
-  src/musa/op/atomic_reduce.cc
-  src/musa/op/copy.cc
-  src/musa/op/fill.cc
-  src/musa/op/finalize_reducer.cc
-  src/musa/op/gemm.cc
-  src/musa/op/gemm/mp31_sqmma.cc
-  src/musa/op/reduce.cc
-  src/musa/op/scan.cc
-  src/musa/op/transpose.cc
-  src/musa/transform/lower_ldg_stg.cc
-  src/musa/transform/lower_fast_divmod.cc
-  src/musa/transform/lower_tme.cc
-  src/musa/runtime.cc
-)
+# Runtime registration directly includes MUSA SDK headers and is intentionally
+# kept behind USE_MUSA together with TVM's MUSA runtime and the optional stubs.
+list(APPEND TILE_LANG_SRCS src/musa/runtime.cc)
