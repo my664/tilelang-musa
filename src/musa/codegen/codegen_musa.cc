@@ -47,6 +47,7 @@
 #include "support/utils.h"
 #include "target/build_common.h"
 #include "target/cuda/ptx.h"
+#include "target/source/codegen_source_base.h"
 #include "tirx/transform/ir_utils.h"
 #include "literal/musa_half_t.h"
 #include "literal/musa_int8_t.h"
@@ -1072,7 +1073,9 @@ void CodeGenMUSA::PrintCallExtern(Type ret_type, ffi::String global_symbol,
       global_symbol == "debug_print_msg") {
     need_debug_h_ = true;
   }
-  if (static_cast<std::string>(global_symbol).rfind("tl::AllReduce<", 0) == 0) {
+  if (static_cast<std::string>(global_symbol).rfind("tl::AllReduce<", 0) == 0 ||
+      static_cast<std::string>(global_symbol).rfind(
+          "tl::WarpFirstAllReduce<", 0) == 0) {
     need_reduce_h_ = true;
   }
   if (static_cast<std::string>(global_symbol).rfind("tl::CumSum", 0) == 0 ||
@@ -2465,7 +2468,7 @@ std::string MTCompile(const std::string& code, const Target& target) {
   return compiled;
 }
 
-ffi::Module BuildMUSA(IRModule mod, Target target) {
+static std::string GenerateMUSASource(const IRModule& mod, const Target& target) {
   bool output_ssa = false;
   CodeGenMUSA cg;
   cg.Init(output_ssa);
@@ -2495,6 +2498,12 @@ ffi::Module BuildMUSA(IRModule mod, Target target) {
     code = (*f)(code, target).cast<std::string>();
   }
 
+  return code;
+}
+
+ffi::Module BuildMUSA(IRModule mod, Target target) {
+  std::string code = GenerateMUSASource(mod, target);
+
   std::string mubin = MTCompile(code, target);
   ffi::Map<ffi::String, ffi::String> source_map;
   source_map.Set("musa", code);
@@ -2506,9 +2515,16 @@ ffi::Module BuildMUSA(IRModule mod, Target target) {
       .cast<ffi::Module>();
 }
 
+ffi::Module BuildMUSAWithoutCompile(IRModule mod, Target target) {
+  std::string code = GenerateMUSASource(mod, target);
+  return CSourceModuleCreate(code, "mu", {});
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("target.build.musa", BuildMUSA);
+  refl::GlobalDef()
+      .def("target.build.musa", BuildMUSA)
+      .def("target.build.musa_without_compile", BuildMUSAWithoutCompile);
 }
 
 TVM_REGISTER_PASS_CONFIG_OPTION("musa.kernels_output_dir", ffi::String);

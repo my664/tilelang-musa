@@ -6,6 +6,7 @@
 #include "backend/common/op/reduce.h"
 
 #include "backend/common/target_utils.h"
+#include "musa/target_utils.h"
 
 #include <sstream>
 
@@ -52,11 +53,18 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
                                          int reducing_threads, int scale,
                                          PrimExpr thread_offset,
                                          PrimExpr all_threads,
-                                         Target) {
+                                         Target target) {
     CheckSyncThreadsScope(reducing_threads, all_threads);
+    const int64_t *offset = as_const_int(thread_offset);
     std::stringstream ss;
-    ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
-       << scale << ", " << thread_offset << ">::run";
+    if (scale == 1 && reducing_threads > TargetMUSAGetWarpSize(target) &&
+        offset != nullptr && *offset == 0) {
+      ss << "tl::WarpFirstAllReduce<" << reducer << ", " << reducing_threads
+         << ", " << thread_offset << ">::run";
+    } else {
+      ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
+         << scale << ", " << thread_offset << ">::run";
+    }
     return ss.str();
   }
 };

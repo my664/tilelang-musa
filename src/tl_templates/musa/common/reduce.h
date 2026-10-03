@@ -199,6 +199,100 @@ private:
   }
 };
 
+// Full-block, scale-1 reduction that performs one warp-local reduction per
+// warp and one cross-warp reduction.  The ordinary AllReduce above is kept for
+// scaled/partial reductions because its XOR topology is part of their layout
+// contract.  This variant is selected by the MUSA lowering only when every
+// thread in the block participates and the reduction scale is one.
+template <class Reducer, int threads, int thread_offset = 0,
+          class Barrier = SyncThreadsBarrier, int batch_size = 1,
+          int workspace_stride = 0>
+struct WarpFirstAllReduce {
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ <= 220)
+  static constexpr int warp_size = 128;
+#else
+  static constexpr int warp_size = 32;
+#endif
+  static constexpr int num_warps = threads / warp_size;
+
+  static_assert(threads > warp_size,
+                "WarpFirstAllReduce requires more than one warp");
+  static_assert(threads % warp_size == 0,
+                "WarpFirstAllReduce threads must be warp aligned");
+  // The cross-warp shuffle mask is a 32-bit lane mask on the supported MUSA
+  // targets, so the second-stage reduction must fit in 32 lanes.
+  static_assert(num_warps <= 32,
+                "WarpFirstAllReduce cross-warp reduction exceeds mask width");
+  static_assert((num_warps & (num_warps - 1)) == 0,
+                "WarpFirstAllReduce warp count must be a power of two");
+  static_assert(batch_size == 1 || workspace_stride > 0,
+                "WarpFirstAllReduce batched workspace must have a stride");
+
+  template <typename T> static TL_DEVICE T run(T x, T *red_buf = nullptr) {
+    const int local_thread = threadIdx.x - thread_offset;
+    const int lane = local_thread % warp_size;
+    const int warp = local_thread / warp_size;
+    const T warp_value = tl::warp_reduce<T>(x, Reducer());
+
+    if (lane == 0) {
+      red_buf[warp] = warp_value;
+    }
+    Barrier::template sync<1>();
+
+    if (warp == 0 && lane < num_warps) {
+      constexpr unsigned mask =
+          num_warps >= 32 ? 0xffffffffu : ((1u << num_warps) - 1u);
+      T total = red_buf[lane];
+      for (int offset = num_warps / 2; offset > 0; offset >>= 1) {
+        total = Reducer()(total, tl::shfl_xor_sync(mask, total, offset));
+      }
+      if (lane == 0) {
+        red_buf[0] = total;
+      }
+    }
+    Barrier::template sync<2>();
+    return red_buf[0];
+  }
+
+  template <typename T>
+  static TL_DEVICE void run_batch(T *x, T *red_buf = nullptr) {
+    const int local_thread = threadIdx.x - thread_offset;
+    const int lane = local_thread % warp_size;
+    const int warp = local_thread / warp_size;
+
+#pragma unroll
+    for (int i = 0; i < batch_size; ++i) {
+      x[i] = tl::warp_reduce<T>(x[i], Reducer());
+      if (lane == 0) {
+        red_buf[warp + i * workspace_stride] = x[i];
+      }
+    }
+    Barrier::template sync<1>();
+
+    if (warp == 0 && lane < num_warps) {
+      constexpr unsigned mask =
+          num_warps >= 32 ? 0xffffffffu : ((1u << num_warps) - 1u);
+#pragma unroll
+      for (int i = 0; i < batch_size; ++i) {
+        T total = red_buf[lane + i * workspace_stride];
+        for (int offset = num_warps / 2; offset > 0; offset >>= 1) {
+          total =
+              Reducer()(total, tl::shfl_xor_sync(mask, total, offset));
+        }
+        if (lane == 0) {
+          red_buf[i * workspace_stride] = total;
+        }
+      }
+    }
+    Barrier::template sync<2>();
+
+#pragma unroll
+    for (int i = 0; i < batch_size; ++i) {
+      x[i] = red_buf[i * workspace_stride];
+    }
+  }
+};
+
 template <typename T, typename ReduceOp>
 TL_DEVICE T warp_reduce(T value, ReduceOp op) {
   constexpr uint32_t mask = 0xffffffff;
