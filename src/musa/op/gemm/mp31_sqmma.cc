@@ -301,6 +301,39 @@ Array<Integer> SQMMA::GetInstShape(const GemmNode &op, int block_size,
       << "No native MP31 SQMMA instruction can cover M=" << op.m_
       << ", N=" << op.n_ << ", K=" << op.k_ << " with m_warp=" << m_warp
       << ", n_warp=" << n_warp;
+
+  // Register-budget guard for the fp16/bf16 -> fp32 accumulate path.  Large
+  // native shapes (m >= 128, n >= 64) materialize B2048/B4096 operand register
+  // tuples; with more than 64 fp32 accumulators per thread the device compiler
+  // fails register allocation ("Fatal regalloc, no free temp for large reg
+  // type B2048/B4096" / "ran out of registers during register allocation:
+  // TEMP_2048").  Measured boundary on S5000 (compile-only, same container):
+  //   native {128,128} 64 acc ok / 128 acc fail
+  //   native {128,64}  64 acc ok / 128 acc fail
+  //   native {128,32}  96 acc ok      native {32,128} 160 acc ok
+  //   native {64,64}   96 acc ok      native {16,64}   80 acc ok
+  // Refuse the combination here with an actionable message instead of letting
+  // mcc fail deep in the backend.  Falling back to a smaller native shape is
+  // NOT a workaround: (a) the fallback only ever triggers for acc > 64 tiles
+  // (the large shapes are skipped exactly when the budget is exceeded), and
+  // those tiles measured 6-10x slower than the recommended ones even when they
+  // were correct; (b) the current fallback path also produces wrong results.
+  // Consequence: for fp16 -> fp32 the native {128,128} shape is unreachable
+  // (squad {128,128} always implies acc = 128); the largest usable native
+  // shape is {128,64} with acc = 64 (>= 256 threads for a 128x128 block).
+  if ((*type_class == SQMMATypeClass::kFP16 ||
+       *type_class == SQMMATypeClass::kBF16) &&
+      (*shape)[0] >= 128 && (*shape)[1] >= 64) {
+    const int64_t acc_per_thread = tile.m * tile.n / 128;
+    ICHECK_LE(acc_per_thread, 64)
+        << "MP31 SQMMA tile M=" << op.m_ << ", N=" << op.n_ << " with "
+        << block_size << " threads needs " << acc_per_thread
+        << " fp32 accumulators per thread, but native instruction "
+        << (*shape)[0] << "x" << (*shape)[1]
+        << " only allows 64 before device register allocation fails. "
+        << "Increase block threads (128x128 needs 256 threads) or shrink the "
+        << "tile.";
+  }
   return {Integer((*shape)[0]), Integer((*shape)[1]), Integer((*shape)[2])};
 }
 

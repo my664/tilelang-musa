@@ -415,8 +415,18 @@ Stmt LowerAsyncCopy(const CopyNode &op, const LowerArgs &lower_args,
 
   auto injected = InjectPTXAsyncCopy(lowered_loop,
                                      /*async_without_async_commit_wait=*/true);
+  // The injector only rewrites vectorized global-to-shared stores.  The copy
+  // thread mapping is derived from the shared layout (SQMMA swizzle) and the
+  // block thread count; some shape/threads combinations produce a scalar local
+  // loop that the vectorizer cannot split (e.g. a 64x64 fp16 tile copied by 256
+  // threads spans two rows inside one unrolled loop), so no cp.async can be
+  // injected.  Report the buffers and thread count instead of a bare check.
   ICHECK(injected.injected_ptx_async_copy)
-      << "T.async_copy requires an eligible global-to-shared vectorized copy.";
+      << "T.async_copy requires an eligible global-to-shared vectorized copy: "
+      << "src=" << op.src->name << op.src->shape
+      << " dst=" << op.dst->name << op.dst->shape
+      << " threads=" << lower_args.thread_bounds->extent
+      << ". Try fewer threads for this tile or a different tile shape.";
 
   if (IsPipelineManagedAsyncCopy(op)) {
     // The pipeline inserts its own commit/wait groups around this copy.
