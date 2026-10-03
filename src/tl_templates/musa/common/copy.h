@@ -2,21 +2,32 @@
 
 #include <cstdint>
 
+// The MUSA SDK ships the cp.async group protocol in musa_pipeline_helpers.h.
+// Reuse it instead of open-coding the inline asm: the mp_31 backend rejects
+// hand-written cp.async asm ("This new pipeline of instruction hasn't been
+// supported for inline asm!") while the SDK helper compiles.  Group-aware
+// wait lets a software pipeline overlap the prefetch of the next stage with
+// the compute of the current one.
+#include <musa_pipeline_helpers.h>
+
 namespace tl {
 
-TL_DEVICE void cp_async_commit() {}
+namespace CpAsyncInternal = mtmusa::experimental::__pipeline_internal;
+
+TL_DEVICE void cp_async_commit() { CpAsyncInternal::pipeline_commit(); }
 
 template <int N> TL_DEVICE void cp_async_wait() {
-  // MTCC has no corresponding MUSA C API; this must use the builtin.
-  __musa_memcpy_g2s_wait();
+  static_assert(N >= 0, "cp_async_wait requires a non-negative group count");
+  CpAsyncInternal::pipeline_wait_prior<N>();
 }
 
 template <int N>
 TL_DEVICE void cp_async_gs(void const *const smem_addr,
                            void const *const global_ptr) {
-  // MTCC has no corresponding MUSA C API; this must use the builtin.
-  __musa_memcpy_g2s((void _AS3 *)smem_addr,
-                    (void const _AS1 *)global_ptr, N, 0);
+  static_assert(N == 4 || N == 8 || N == 16,
+                "cp.async supports 4, 8 or 16 byte transfers");
+  CpAsyncInternal::pipeline_memcpy_async<N, N>(
+      const_cast<void *>(smem_addr), global_ptr);
 }
 
 template <int N>
