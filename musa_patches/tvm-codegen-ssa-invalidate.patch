@@ -1,0 +1,52 @@
+diff --git a/3rdparty/tvm/src/target/source/codegen_source_base.h b/3rdparty/tvm/src/target/source/codegen_source_base.h
+--- a/3rdparty/tvm/src/target/source/codegen_source_base.h
++++ b/3rdparty/tvm/src/target/source/codegen_source_base.h
+@@ -73,9 +73,19 @@
+     std::string vid;
+     /*! \brief The scope id, used to check if this entry is invalid. */
+     int scope_id;
++    /*! \brief Whether the entry denotes a constant expression. */
++    bool is_const{false};
+   };
+   /*! \brief Clear the states that might relates to function generation */
+   void ClearFuncState();
++  /*!
++   * \brief Drop cached SSA assignments for non-constant expressions.
++   *
++   * Call this when a statement may write memory (for example an opaque extern
++   * call with a write access pointer): a later load of the same expression
++   * text must not reuse a value captured before the write.
++   */
++  void InvalidateSSALoads();
+   /*! \brief print the current indented value */
+   void PrintIndent();
+   /*!
+
+diff --git a/3rdparty/tvm/src/target/source/codegen_source_base.cc b/3rdparty/tvm/src/target/source/codegen_source_base.cc
+--- a/3rdparty/tvm/src/target/source/codegen_source_base.cc
++++ b/3rdparty/tvm/src/target/source/codegen_source_base.cc
+@@ -34,6 +34,16 @@
+   scope_mark_.clear();
+ }
+ 
++void CodeGenSourceBase::InvalidateSSALoads() {
++  for (auto it = ssa_assign_map_.begin(); it != ssa_assign_map_.end();) {
++    if (!it->second.is_const) {
++      it = ssa_assign_map_.erase(it);
++    } else {
++      ++it;
++    }
++  }
++}
++
+ std::string CodeGenSourceBase::SSAGetID(std::string src, DataType t) {
+   if (name_supply_->ContainsName(src)) return src;
+   auto it = ssa_assign_map_.find(src);
+@@ -80,6 +90,7 @@
+     SSAEntry e;
+     e.vid = vid;
+     e.scope_id = 0;
++    e.is_const = true;
+     ssa_assign_map_[vid] = e;
+   } else {
+     TVM_FFI_ICHECK_EQ(it->second.vid, vid);
