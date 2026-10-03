@@ -75,8 +75,10 @@ class GemmMP31SQMMA(GemmBase):
         inst_m, inst_n, inst_k = self._get_inst_shape(target, thread_nums, m_warp, n_warp)
         a_shape = self.A.shape
         b_shape = self.B.shape
-        if len(a_shape) != 2 or len(b_shape) != 2:
-            raise ValueError("GemmMP31SQMMA expects 2D A/B buffers")
+        if len(a_shape) < 2 or len(b_shape) < 2:
+            raise ValueError("GemmMP31SQMMA expects at least 2D A/B buffers")
+        # Software-pipelined operands carry leading stage dimensions; the
+        # shared layout applies to the last two dimensions.
 
         a_layout = make_mp31_sqmma_shared_ab(
             self.A,

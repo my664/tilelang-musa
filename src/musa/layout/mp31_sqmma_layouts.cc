@@ -50,22 +50,52 @@ Layout MakeMP31SQMMASharedAB(const tirx::Buffer &buffer, int continuity,
                              bool k_major) {
   (void)continuity;
   ICHECK(buffer.defined()) << "MP31 SQMMA shared layout expects a buffer";
-  ICHECK_EQ(buffer->shape.size(), 2)
-      << "MP31 SQMMA shared layout expects a 2D buffer, got rank="
-      << buffer->shape.size();
+  const size_t rank = buffer->shape.size();
+  ICHECK_GE(rank, 2) << "MP31 SQMMA shared layout expects rank >= 2, got rank="
+                     << rank;
 
-  const int rows = GetConstInt(buffer->shape[0], "rows");
-  const int cols = GetConstInt(buffer->shape[1], "cols");
+  const int rows = GetConstInt(buffer->shape[rank - 2], "rows");
+  const int cols = GetConstInt(buffer->shape[rank - 1], "cols");
   const int element_size = buffer->dtype.bits();
   ICHECK(element_size == 8 || element_size == 16 || element_size == 32)
       << "Unsupported MP31 SQMMA shared layout with element_size="
       << element_size;
 
+  if (rank == 2) {
+    const int sg = k_major ? 16 : element_size * 2;
+    constexpr int kSwizzleStride = 256;
+    constexpr int kSwizzleLine = 256;
+    return MakeMP31SQMMAABSwizzleLayout(rows, cols, element_size, sg,
+                                        kSwizzleStride, kSwizzleLine);
+  }
+
+  // Pipelined buffers carry leading stage dimensions.  Apply the 2D SQMMA
+  // swizzle to the last two dimensions and pass the leading indices through,
+  // matching the multi-versioned shared buffer layout.
+  Var row = InputPlaceholder(rank - 2);
+  Var col = InputPlaceholder(rank - 1);
   const int sg = k_major ? 16 : element_size * 2;
   constexpr int kSwizzleStride = 256;
   constexpr int kSwizzleLine = 256;
-  return MakeMP31SQMMAABSwizzleLayout(rows, cols, element_size, sg,
-                                      kSwizzleStride, kSwizzleLine);
+  PrimExpr addr = (row * cols + col) * (element_size / 8);
+  PrimExpr line_id = FloorDiv(addr, kSwizzleLine);
+  PrimExpr line_offset = FloorMod(addr, kSwizzleLine);
+  PrimExpr granules_per_stride = kSwizzleStride / sg;
+  PrimExpr cycle_line_id = FloorMod(line_id, granules_per_stride);
+  PrimExpr granule_id = FloorDiv(line_offset, sg);
+  PrimExpr granule_offset = FloorMod(line_offset, sg);
+  PrimExpr target_granule_id = granule_id ^ cycle_line_id;
+  PrimExpr target_addr = line_id * kSwizzleLine +
+                         target_granule_id * sg + granule_offset;
+  PrimExpr target_linear = FloorDiv(target_addr, element_size / 8);
+
+  Array<PrimExpr> forward;
+  for (size_t i = 0; i + 2 < rank; ++i) {
+    forward.push_back(InputPlaceholder(i));
+  }
+  forward.push_back(FloorDiv(target_linear, cols));
+  forward.push_back(FloorMod(target_linear, cols));
+  return Layout(buffer->shape, forward);
 }
 
 Fragment MakeMP31SQMMAFragmentC(Array<PrimExpr> shape, int warp_m, int warp_n,
