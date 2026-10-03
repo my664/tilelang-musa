@@ -26,13 +26,27 @@ namespace musa {
 
 namespace {
 
-bool IsExplicitAsyncCopy(const CopyNode &op) {
-  if (auto value = op.annotations.Get("is_async_copy")) {
+bool GetBoolAnnotationValue(const CopyNode &op, const char *key) {
+  if (auto value = op.annotations.Get(key)) {
     if (const auto *flag = value.value().as<IntImmNode>()) {
       return flag->value != 0;
     }
   }
   return false;
+}
+
+bool IsExplicitAsyncCopy(const CopyNode &op) {
+  if (GetBoolAnnotationValue(op, "is_async_copy")) {
+    return true;
+  }
+  // A pipeline-managed copy asks for a raw cp.async; the enclosing pipeline
+  // inserts the commit/wait groups itself.  This mirrors the CUDA lowering
+  // (cuda/op/copy_analysis.cc treats no_implicit_async_commit_wait as async).
+  return GetBoolAnnotationValue(op, attr::kAsyncCopyNoImplicitCommitWait);
+}
+
+bool IsPipelineManagedAsyncCopy(const CopyNode &op) {
+  return GetBoolAnnotationValue(op, attr::kAsyncCopyNoImplicitCommitWait);
 }
 
 bool IsExplicitTmaCopy(const CopyNode &op) {
@@ -404,6 +418,10 @@ Stmt LowerAsyncCopy(const CopyNode &op, const LowerArgs &lower_args,
   ICHECK(injected.injected_ptx_async_copy)
       << "T.async_copy requires an eligible global-to-shared vectorized copy.";
 
+  if (IsPipelineManagedAsyncCopy(op)) {
+    // The pipeline inserts its own commit/wait groups around this copy.
+    return injected.stmt;
+  }
   Stmt commit_group =
       Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
   return SeqStmt({injected.stmt, commit_group});
