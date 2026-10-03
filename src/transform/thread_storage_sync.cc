@@ -1500,7 +1500,8 @@ private:
       return;
     syncs_inserted_.insert(obj);
   }
-  bool PointerAccessIsDisjoint(const AccessEntry &lhs, const AccessEntry &rhs) {
+  bool AccessByteRangesAreDisjoint(const AccessEntry &lhs,
+                                   const AccessEntry &rhs) {
     if (lhs.touched.size() != 1 || rhs.touched.size() != 1) {
       return false;
     }
@@ -1516,10 +1517,27 @@ private:
         {"ty1", "ty2"},
         {"tz1", "tz2"},
     };
-    PrimExpr lhs_min = analyzer.Simplify(lhs.touched[0].min());
-    PrimExpr lhs_max = analyzer.Simplify(lhs.touched[0].max());
-    PrimExpr rhs_min = analyzer.Simplify(rhs.touched[0].min());
-    PrimExpr rhs_max = analyzer.Simplify(rhs.touched[0].max());
+    if (lhs.dtype.is_handle() || rhs.dtype.is_handle()) {
+      // Opaque pointer accesses carry no element size; stay conservative.
+      return false;
+    }
+    PrimExpr lhs_min = lhs.touched[0].min();
+    PrimExpr lhs_max = lhs.touched[0].max();
+    PrimExpr rhs_min = rhs.touched[0].min();
+    PrimExpr rhs_max = rhs.touched[0].max();
+    for (const PrimExpr *expr : {&lhs_min, &lhs_max, &rhs_min, &rhs_max}) {
+      if (!expr->dtype().is_int() && !expr->dtype().is_uint()) {
+        // A non-integer touched range cannot be scaled into byte offsets.
+        return false;
+      }
+    }
+    int lhs_elem_bytes = lhs.dtype.bytes() * lhs.dtype.lanes();
+    int rhs_elem_bytes = rhs.dtype.bytes() * rhs.dtype.lanes();
+    PrimExpr lhs_begin =
+        analyzer.Simplify(lhs_min * lhs_elem_bytes);
+    PrimExpr lhs_end = analyzer.Simplify((lhs_max + 1) * lhs_elem_bytes);
+    PrimExpr rhs_begin = analyzer.Simplify(rhs_min * rhs_elem_bytes);
+    PrimExpr rhs_end = analyzer.Simplify((rhs_max + 1) * rhs_elem_bytes);
     Map<Var, PrimExpr> prev_sub, curr_sub;
     for (unsigned idx = 0; idx != 3; ++idx) {
       auto &info = thread_vars[idx];
@@ -1535,21 +1553,21 @@ private:
                                      /*rename_ranges=*/false);
     curr_cset = curr_cset.RenameFrom("<CURR>", curr_sub, std::nullopt,
                                      /*rename_ranges=*/false);
-    lhs_min = Substitute(lhs_min, prev_sub);
-    lhs_max = Substitute(lhs_max, prev_sub);
-    rhs_min = Substitute(rhs_min, curr_sub);
-    rhs_max = Substitute(rhs_max, curr_sub);
+    lhs_begin = Substitute(lhs_begin, prev_sub);
+    lhs_end = Substitute(lhs_end, prev_sub);
+    rhs_begin = Substitute(rhs_begin, curr_sub);
+    rhs_end = Substitute(rhs_end, curr_sub);
     // Lower to predicates before merging so that a variable bound to different
     // values on the two sides does not trip the analyzer's re-bind check.
     prev_cset.ToConstraints()
         .Merge(curr_cset.ToConstraints())
         .Populate(analyzer);
 
-    if (analyzer.CanProve(lhs_max < rhs_min,
+    if (analyzer.CanProve(lhs_end <= rhs_begin,
                           arith::ProofStrength::kSymbolicBound)) {
       return true;
     }
-    if (analyzer.CanProve(rhs_max < lhs_min,
+    if (analyzer.CanProve(rhs_end <= lhs_begin,
                           arith::ProofStrength::kSymbolicBound)) {
       return true;
     }
@@ -1682,21 +1700,26 @@ private:
       return false;
     }
 
-    if (prev.buffer_indices.size() != curr.buffer_indices.size()) {
-      // They are not the same indices, should be conflict.
+    if (prev.is_pointer_access || curr.is_pointer_access) {
+      // Pointer-producing calls are opaque to the index-based analysis below.
+      // For same-iteration dependencies, however, both pointer and ordinary
+      // buffer accesses expose physical touched intervals.  Compare those
+      // intervals in bytes so aliases with different element types use one
+      // address space.  Keep the historical pointer-pointer loop behaviour;
+      // mixed loop-carried accesses remain conservative because the pointer
+      // interval is not shifted with the loop here.
+      bool can_compare_ranges =
+          loop == nullptr ||
+          (prev.is_pointer_access && curr.is_pointer_access);
+      if (can_compare_ranges && AccessByteRangesAreDisjoint(prev, curr)) {
+        return false;
+      }
+      // If disjointness cannot be proved, treat the accesses as overlapping.
       return true;
     }
 
-    if (prev.is_pointer_access || curr.is_pointer_access) {
-      // For accesses created via tvm_access_ptr we may still be able to prove
-      // disjointness using their byte ranges. If both sides expose a touched
-      // interval and we can show they don't overlap, skip the conflict.
-      if (prev.is_pointer_access && curr.is_pointer_access &&
-          PointerAccessIsDisjoint(prev, curr)) {
-        return false;
-      }
-      // Otherwise fall back to the conservative answer: treat them as
-      // overlapping.
+    if (prev.buffer_indices.size() != curr.buffer_indices.size()) {
+      // They are not the same indices, should be conflict.
       return true;
     }
 

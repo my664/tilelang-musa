@@ -91,6 +91,109 @@ def test_thread_sync_shared_dyn_alias_different_element_sizes():
     assert sync_pos < write_pos, f"Sync should appear before aliased fp8 write:\n{s}"
 
 
+def test_thread_sync_shared_dyn_disjoint_pointer_and_buffer_accesses():
+    """Disjoint arena slices do not need barriers around an opaque pointer call."""
+
+    @T.prim_func(private=True)
+    def func():
+        arena = T.alloc_buffer((9216,), "uint8", scope="shared.dyn")
+        staging: T.handle("bfloat16", "shared.dyn") = T.handle_add_byte_offset(arena.data, 0)
+        workspace: T.handle("float32", "shared.dyn") = T.handle_add_byte_offset(arena.data, 8192)
+        local = T.alloc_buffer((8,), "bfloat16", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 256)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        staging_buf = T.decl_buffer((4096,), "bfloat16", data=staging, scope="shared.dyn")
+        workspace_buf = T.decl_buffer((256,), "float32", data=workspace, scope="shared.dyn")
+        local_buf = T.decl_buffer((8,), "bfloat16", data=local.data, scope="local")
+        local_buf[T.Ramp(0, 1, 8)] = staging_buf[T.Ramp(tx * 8, 1, 8)]
+        T.evaluate(
+            T.call_extern(
+                "handle",
+                "opaque_workspace_rw",
+                T.tvm_access_ptr(
+                    T.type_annotation("float32"), workspace_buf.data, 0, 256, 3
+                ),
+            )
+        )
+        staging_buf[T.Ramp(tx * 8, 1, 8)] = local_buf[T.Ramp(0, 1, 8)]
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    s = str(mod.script())
+    assert 'T.tvm_storage_sync("shared.dyn")' not in s, f"Unexpected sync:\n{s}"
+
+
+def test_thread_sync_shared_dyn_overlapping_pointer_and_buffer_accesses():
+    """An opaque pointer call still needs barriers when its arena slice overlaps."""
+
+    @T.prim_func(private=True)
+    def func():
+        arena = T.alloc_buffer((8192,), "uint8", scope="shared.dyn")
+        staging: T.handle("bfloat16", "shared.dyn") = T.handle_add_byte_offset(arena.data, 0)
+        workspace: T.handle("float32", "shared.dyn") = T.handle_add_byte_offset(arena.data, 0)
+        local = T.alloc_buffer((8,), "bfloat16", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 256)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        staging_buf = T.decl_buffer((4096,), "bfloat16", data=staging, scope="shared.dyn")
+        workspace_buf = T.decl_buffer((256,), "float32", data=workspace, scope="shared.dyn")
+        local_buf = T.decl_buffer((8,), "bfloat16", data=local.data, scope="local")
+        local_buf[T.Ramp(0, 1, 8)] = staging_buf[T.Ramp(tx * 8, 1, 8)]
+        T.evaluate(
+            T.call_extern(
+                "handle",
+                "opaque_workspace_rw",
+                T.tvm_access_ptr(
+                    T.type_annotation("float32"), workspace_buf.data, 0, 256, 3
+                ),
+            )
+        )
+        staging_buf[T.Ramp(tx * 8, 1, 8)] = local_buf[T.Ramp(0, 1, 8)]
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    s = str(mod.script())
+    assert s.count('T.tvm_storage_sync("shared.dyn")') == 2, f"Expected two syncs:\n{s}"
+
+
+def test_thread_sync_shared_dyn_pointer_ranges_compare_physical_bytes():
+    """Pointer ranges with different dtypes must be compared in physical bytes."""
+
+    @T.prim_func(private=True)
+    def func():
+        arena = T.alloc_buffer((1024,), "uint8", scope="shared.dyn")
+        floats: T.handle("float32", "shared.dyn") = T.handle_add_byte_offset(arena.data, 0)
+        bytes_: T.handle("uint8", "shared.dyn") = T.handle_add_byte_offset(arena.data, 512)
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 256)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        float_buf = T.decl_buffer((256,), "float32", data=floats, scope="shared.dyn")
+        byte_buf = T.decl_buffer((256,), "uint8", data=bytes_, scope="shared.dyn")
+        T.evaluate(
+            T.call_extern(
+                "handle",
+                "opaque_write",
+                T.tvm_access_ptr(T.type_annotation("float32"), float_buf.data, 0, 256, 2),
+            )
+        )
+        T.evaluate(
+            T.call_extern(
+                "handle",
+                "opaque_read",
+                T.tvm_access_ptr(T.type_annotation("uint8"), byte_buf.data, 0, 256, 1),
+            )
+        )
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    s = str(mod.script())
+    assert s.count('T.tvm_storage_sync("shared.dyn")') == 1, f"Expected one sync:\n{s}"
+
+
 @tilelang.testing.requires_cuda
 def test_thread_sync_handles_int64_tvm_access_ptr_offset():
     """Regression: shared/shared.dyn pointer offsets may be int64.
