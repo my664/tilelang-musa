@@ -22,7 +22,8 @@ class PassPipeline:
     def lower(self, mod: IRModule, target: Target) -> IRModule:
         """Run the pipeline and render source snippets for located errors."""
         try:
-            return self._lower(mod, target)
+            with target:
+                return self._lower(mod, target)
         except Exception as exc:
             # Compiler passes append a machine-readable `--> file:line:col`
             # marker when the relevant IR node carries a span. Keep enrichment

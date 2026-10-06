@@ -239,12 +239,11 @@ struct WarpFirstAllReduce {
     }
     Barrier::template sync<1>();
 
-    if (warp == 0 && lane < num_warps) {
-      constexpr unsigned mask =
-          num_warps >= 32 ? 0xffffffffu : ((1u << num_warps) - 1u);
-      T total = red_buf[lane];
+    if (warp == 0) {
+      T total = (lane < num_warps) ? red_buf[lane] : red_buf[0];
+#pragma unroll
       for (int offset = num_warps / 2; offset > 0; offset >>= 1) {
-        total = Reducer()(total, tl::shfl_xor_sync(mask, total, offset));
+        total = Reducer()(total, tl::shfl_xor_sync(0xffffffffu, total, offset));
       }
       if (lane == 0) {
         red_buf[0] = total;
@@ -269,15 +268,15 @@ struct WarpFirstAllReduce {
     }
     Barrier::template sync<1>();
 
-    if (warp == 0 && lane < num_warps) {
-      constexpr unsigned mask =
-          num_warps >= 32 ? 0xffffffffu : ((1u << num_warps) - 1u);
+    if (warp == 0) {
 #pragma unroll
       for (int i = 0; i < batch_size; ++i) {
-        T total = red_buf[lane + i * workspace_stride];
+        T total = (lane < num_warps) ? red_buf[lane + i * workspace_stride]
+                                     : red_buf[i * workspace_stride];
+#pragma unroll
         for (int offset = num_warps / 2; offset > 0; offset >>= 1) {
           total =
-              Reducer()(total, tl::shfl_xor_sync(mask, total, offset));
+              Reducer()(total, tl::shfl_xor_sync(0xffffffffu, total, offset));
         }
         if (lane == 0) {
           red_buf[i * workspace_stride] = total;

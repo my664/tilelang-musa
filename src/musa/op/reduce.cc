@@ -40,12 +40,20 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
                                         PrimExpr thread_offset,
                                         PrimExpr all_threads,
                                         int batch, int workspace_stride,
-                                        Target) {
+                                        Target target) {
     CheckSyncThreadsScope(reducing_threads, all_threads);
+    const int64_t *offset = as_const_int(thread_offset);
     std::stringstream ss;
-    ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
-       << scale << ", " << thread_offset << ", tl::SyncThreadsBarrier, "
-       << batch << ", " << workspace_stride << ">::run_batch";
+    if (scale == 1 && reducing_threads > TargetMUSAGetWarpSize(target) &&
+        offset != nullptr && *offset == 0) {
+      ss << "tl::WarpFirstAllReduce<" << reducer << ", " << reducing_threads
+         << ", " << thread_offset << ", tl::SyncThreadsBarrier, "
+         << batch << ", " << workspace_stride << ">::run_batch";
+    } else {
+      ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
+         << scale << ", " << thread_offset << ", tl::SyncThreadsBarrier, "
+         << batch << ", " << workspace_stride << ">::run_batch";
+    }
     return ss.str();
   }
 
