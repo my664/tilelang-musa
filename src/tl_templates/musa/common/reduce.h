@@ -7,9 +7,6 @@
 
 namespace tl {
 
-template <typename T, typename ReduceOp>
-TL_DEVICE T warp_reduce(T value, ReduceOp op);
-
 template <typename T> struct AccType {
   using type = T;
 };
@@ -119,91 +116,39 @@ TL_DEVICE mt_bfloat16 shfl_xor_sync(unsigned mask, mt_bfloat16 val,
 }
 #endif
 
-template <class Reducer, int threads, int scale, int thread_offset = 0,
-          class Barrier = SyncThreadsBarrier, int batch_size = 1,
-          int workspace_stride = 0>
-struct AllReduce {
-  static_assert(threads > 0, "tl::AllReduce threads must be positive");
-  static_assert(scale > 0, "tl::AllReduce scale must be positive");
-  static_assert(threads % scale == 0,
-                "tl::AllReduce threads must be divisible by scale");
-  static_assert(((threads / scale) & (threads / scale - 1)) == 0,
-                "tl::AllReduce reduce width must be a power of two");
-
-  template <typename T> static TL_DEVICE T run(T x, T *red_buf = nullptr) {
-    if constexpr (threads == scale) {
-      return x;
-    } else {
-      return butterfly_reduce_scalar(x, red_buf);
-    }
+template <typename T, typename ReduceOp>
+TL_DEVICE T warp_reduce(T value, ReduceOp op) {
+  constexpr uint32_t mask = 0xffffffff;
+  int warp_size = detail::default_warp_size();
+  for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
+    value = op(value, tl::shfl_xor_sync(mask, value, offset));
   }
+  return value;
+}
 
-  template <typename T>
-  static TL_DEVICE void run_batch(T *x, T *red_buf = nullptr) {
-    if constexpr (threads == scale) {
-      return;
-    } else {
-      butterfly_reduce_batch(x, red_buf);
-    }
-  }
+template <typename T> TL_DEVICE T warp_reduce_sum(T value) {
+  return warp_reduce<T>(value, SumOp());
+}
 
-private:
-  using Next = AllReduce<Reducer, threads / 2, scale, thread_offset, Barrier,
-                         batch_size, workspace_stride>;
+template <typename T> TL_DEVICE T warp_reduce_max(T value) {
+  return warp_reduce<T>(value, MaxOp());
+}
 
-  template <typename T>
-  static TL_DEVICE T butterfly_reduce_scalar(T x, T *red_buf) {
-    constexpr int offset = threads / 2;
-    if constexpr (offset >= 32) {
-      Barrier::template sync<1>();
-      red_buf[threadIdx.x - thread_offset] = x;
-      Barrier::template sync<2>();
-      x = Reducer()(x, red_buf[(threadIdx.x - thread_offset) ^ offset]);
-    } else {
-      x = Reducer()(x, tl::shfl_xor_sync(uint32_t(-1), x, offset));
-    }
-    if constexpr (offset == scale) {
-      return x;
-    } else {
-      return Next::run(x, red_buf);
-    }
-  }
+template <typename T> TL_DEVICE T warp_reduce_min(T value) {
+  return warp_reduce<T>(value, MinOp());
+}
 
-  template <typename T>
-  static TL_DEVICE void butterfly_reduce_batch(T *x, T *red_buf) {
-    constexpr int offset = threads / 2;
-    if constexpr (offset >= 32) {
-      Barrier::template sync<1>();
-#pragma unroll
-      for (int i = 0; i < batch_size; i++) {
-        red_buf[(threadIdx.x - thread_offset) + i * workspace_stride] = x[i];
-      }
-      Barrier::template sync<2>();
-#pragma unroll
-      for (int i = 0; i < batch_size; i++) {
-        x[i] =
-            Reducer()(x[i], red_buf[((threadIdx.x - thread_offset) ^ offset) +
-                                    i * workspace_stride]);
-      }
-    } else {
-#pragma unroll
-      for (int i = 0; i < batch_size; i++) {
-        x[i] = Reducer()(x[i], tl::shfl_xor_sync(uint32_t(-1), x[i], offset));
-      }
-    }
-    if constexpr (offset == scale) {
-      return;
-    } else {
-      Next::run_batch(x, red_buf);
-    }
-  }
-};
+template <typename T> TL_DEVICE T warp_reduce_bitand(T value) {
+  return warp_reduce<T>(value, BitAndOp());
+}
+
+template <typename T> TL_DEVICE T warp_reduce_bitor(T value) {
+  return warp_reduce<T>(value, BitOrOp());
+}
 
 // Full-block, scale-1 reduction that performs one warp-local reduction per
-// warp and one cross-warp reduction.  The ordinary AllReduce above is kept for
-// scaled/partial reductions because its XOR topology is part of their layout
-// contract.  This variant is selected by the MUSA lowering only when every
-// thread in the block participates and the reduction scale is one.
+// warp and one cross-warp reduction. The cross-warp step is divergence-free:
+// all 32 lanes participate in the __shfl_xor_sync using mask 0xffffffffu.
 template <class Reducer, int threads, int thread_offset = 0,
           class Barrier = SyncThreadsBarrier, int batch_size = 1,
           int workspace_stride = 0>
@@ -292,34 +237,99 @@ struct WarpFirstAllReduce {
   }
 };
 
-template <typename T, typename ReduceOp>
-TL_DEVICE T warp_reduce(T value, ReduceOp op) {
-  constexpr uint32_t mask = 0xffffffff;
-  int warp_size = detail::default_warp_size();
-  for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
-    value = op(value, tl::shfl_xor_sync(mask, value, offset));
+template <class Reducer, int threads, int scale = 1, int thread_offset = 0,
+          class Barrier = SyncThreadsBarrier, int batch_size = 1,
+          int workspace_stride = 0>
+struct AllReduce {
+#if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ <= 220)
+  static constexpr int warp_size = 128;
+#else
+  static constexpr int warp_size = 32;
+#endif
+
+  static_assert(threads > 0, "tl::AllReduce threads must be positive");
+  static_assert(scale > 0, "tl::AllReduce scale must be positive");
+  static_assert(threads % scale == 0,
+                "tl::AllReduce threads must be divisible by scale");
+  static_assert(((threads / scale) & (threads / scale - 1)) == 0,
+                "tl::AllReduce reduce width must be a power of two");
+
+  template <typename T> static TL_DEVICE T run(T x, T *red_buf = nullptr) {
+    if constexpr (threads > warp_size && scale == 1 && thread_offset == 0 &&
+                  (threads % warp_size == 0)) {
+      return WarpFirstAllReduce<Reducer, threads, thread_offset, Barrier,
+                                batch_size, workspace_stride>::run(x, red_buf);
+    } else if constexpr (threads == scale) {
+      return x;
+    } else {
+      return butterfly_reduce_scalar(x, red_buf);
+    }
   }
-  return value;
-}
 
-template <typename T> TL_DEVICE T warp_reduce_sum(T value) {
-  return warp_reduce<T>(value, SumOp());
-}
+  template <typename T>
+  static TL_DEVICE void run_batch(T *x, T *red_buf = nullptr) {
+    if constexpr (threads > warp_size && scale == 1 && thread_offset == 0 &&
+                  (threads % warp_size == 0) &&
+                  (batch_size == 1 || workspace_stride > 0)) {
+      WarpFirstAllReduce<Reducer, threads, thread_offset, Barrier, batch_size,
+                         workspace_stride>::run_batch(x, red_buf);
+    } else if constexpr (threads == scale) {
+      return;
+    } else {
+      butterfly_reduce_batch(x, red_buf);
+    }
+  }
 
-template <typename T> TL_DEVICE T warp_reduce_max(T value) {
-  return warp_reduce<T>(value, MaxOp());
-}
+private:
+  using Next = AllReduce<Reducer, threads / 2, scale, thread_offset, Barrier,
+                         batch_size, workspace_stride>;
 
-template <typename T> TL_DEVICE T warp_reduce_min(T value) {
-  return warp_reduce<T>(value, MinOp());
-}
+  template <typename T>
+  static TL_DEVICE T butterfly_reduce_scalar(T x, T *red_buf) {
+    constexpr int offset = threads / 2;
+    if constexpr (offset >= 32) {
+      Barrier::template sync<1>();
+      red_buf[threadIdx.x - thread_offset] = x;
+      Barrier::template sync<2>();
+      x = Reducer()(x, red_buf[(threadIdx.x - thread_offset) ^ offset]);
+    } else {
+      x = Reducer()(x, tl::shfl_xor_sync(uint32_t(-1), x, offset));
+    }
+    if constexpr (offset == scale) {
+      return x;
+    } else {
+      return Next::run(x, red_buf);
+    }
+  }
 
-template <typename T> TL_DEVICE T warp_reduce_bitand(T value) {
-  return warp_reduce<T>(value, BitAndOp());
-}
-
-template <typename T> TL_DEVICE T warp_reduce_bitor(T value) {
-  return warp_reduce<T>(value, BitOrOp());
-}
+  template <typename T>
+  static TL_DEVICE void butterfly_reduce_batch(T *x, T *red_buf) {
+    constexpr int offset = threads / 2;
+    if constexpr (offset >= 32) {
+      Barrier::template sync<1>();
+#pragma unroll
+      for (int i = 0; i < batch_size; i++) {
+        red_buf[(threadIdx.x - thread_offset) + i * workspace_stride] = x[i];
+      }
+      Barrier::template sync<2>();
+#pragma unroll
+      for (int i = 0; i < batch_size; i++) {
+        x[i] =
+            Reducer()(x[i], red_buf[((threadIdx.x - thread_offset) ^ offset) +
+                                    i * workspace_stride]);
+      }
+    } else {
+#pragma unroll
+      for (int i = 0; i < batch_size; i++) {
+        x[i] = Reducer()(x[i], tl::shfl_xor_sync(uint32_t(-1), x[i], offset));
+      }
+    }
+    if constexpr (offset == scale) {
+      return;
+    } else {
+      Next::run_batch(x, red_buf);
+    }
+  }
+};
 
 } // namespace tl
