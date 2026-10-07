@@ -39,6 +39,9 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     LayoutVisual(mod)
     mod = tilelang.transform.LowerTileOp()(mod)
     mod = tilelang.musa.transform.LowerTMEIntrin()(mod)
+    # Fold only provably point-to-point shared staging before vectorization,
+    # StorageRewrite, and ThreadSync materialize the physical shared buffer.
+    mod = tilelang.transform.EliminateRedundantSharedStaging()(mod)
 
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
