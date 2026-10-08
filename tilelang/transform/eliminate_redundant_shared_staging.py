@@ -16,6 +16,7 @@ never a semantic fallback.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Union
 
 from tvm import ir, tirx
 from tvm.tirx import (
@@ -25,6 +26,8 @@ from tvm.tirx import (
     Call,
     Evaluate,
     For,
+    IfThenElse,
+    PrimExpr,
     PrimFunc,
     PyStmtExprMutator,
     SeqStmt,
@@ -60,34 +63,53 @@ def _is_shared_sync(stmt: Stmt) -> bool:
 
 @dataclass
 class _WrappedStore:
-    path: list[For]
+    path: list[Union[For, PrimExpr]]
     store: BufferStore
 
 
 def _unwrap_store(stmt: Stmt) -> _WrappedStore | None:
-    path: list[For] = []
+    path: list[Union[For, PrimExpr]] = []
     current = stmt
-    while isinstance(current, For):
-        path.append(current)
-        current = current.body
+    while True:
+        if isinstance(current, For):
+            path.append(current)
+            current = current.body
+        elif isinstance(current, IfThenElse):
+            if current.else_case is not None and not (
+                isinstance(current.else_case, Evaluate)
+                and hasattr(current.else_case.value, "value")
+                and current.else_case.value.value == 0
+            ):
+                return None
+            path.append(current.condition)
+            current = current.then_case
+        elif isinstance(current, SeqStmt) and len(current.seq) == 1:
+            current = current.seq[0]
+        else:
+            break
     if isinstance(current, BufferStore):
         return _WrappedStore(path, current)
     return None
 
 
-def _rebuild(path: list[For], store: BufferStore) -> Stmt:
+def _rebuild(path: list[Union[For, PrimExpr]], store: BufferStore) -> Stmt:
     result: Stmt = store
-    for loop in reversed(path):
-        result = For(
-            loop.loop_var,
-            loop.min,
-            loop.extent,
-            loop.kind,
-            result,
-            loop.thread_binding,
-            loop.annotations,
-            loop.step,
-        )
+    for item in reversed(path):
+        if isinstance(item, For):
+            result = For(
+                item.loop_var,
+                item.min,
+                item.extent,
+                item.kind,
+                result,
+                item.thread_binding,
+                item.annotations,
+                item.step,
+            )
+        elif isinstance(item, PrimExpr):
+            result = IfThenElse(item, result, None)
+        else:
+            raise TypeError(f"Unexpected path element: {type(item)}")
     return result
 
 
@@ -97,10 +119,17 @@ def _loop_mapping(producer: _WrappedStore, consumer: _WrappedStore) -> tuple[dic
     producer_to_consumer: dict[Var, Var] = {}
     consumer_to_producer: dict[Var, Var] = {}
     for left, right in zip(producer.path, consumer.path):
-        if left.kind != right.kind or not _same_expr(left.min, right.min) or not _same_expr(left.extent, right.extent):
+        if isinstance(left, For) and isinstance(right, For):
+            if left.kind != right.kind or not _same_expr(left.min, right.min) or not _same_expr(left.extent, right.extent):
+                return None
+            producer_to_consumer[left.loop_var] = right.loop_var
+            consumer_to_producer[right.loop_var] = left.loop_var
+        elif isinstance(left, PrimExpr) and isinstance(right, PrimExpr):
+            right_mapped = substitute(right, consumer_to_producer)
+            if not _same_expr(left, right_mapped):
+                return None
+        else:
             return None
-        producer_to_consumer[left.loop_var] = right.loop_var
-        consumer_to_producer[right.loop_var] = left.loop_var
     return producer_to_consumer, consumer_to_producer
 
 
@@ -144,6 +173,7 @@ def _other_shared_access(stmt: Stmt, target: Buffer) -> bool:
     return found
 
 
+@tirx.functor.mutator
 class _StagingMutator(PyStmtExprMutator):
     """Rewrite lexical sequences and remember buffers whose accesses vanished."""
 
@@ -186,7 +216,10 @@ class _StagingMutator(PyStmtExprMutator):
         accesses: list[tuple[int, _WrappedStore]] = []
         for index, stmt in enumerate(stmts):
             wrapped = _unwrap_store(stmt)
-            if wrapped is not None and (wrapped.store.buffer.same_as(target) or (isinstance(wrapped.store.value, BufferLoad) and wrapped.store.value.buffer.same_as(target))):
+            if wrapped is not None and (
+                wrapped.store.buffer.same_as(target)
+                or (isinstance(wrapped.store.value, BufferLoad) and wrapped.store.value.buffer.same_as(target))
+            ):
                 accesses.append((index, wrapped))
         if len(accesses) != 4:
             return None
@@ -202,11 +235,11 @@ class _StagingMutator(PyStmtExprMutator):
                 c_load = _direct_load(consumer.store)
                 if c_load is None:
                     continue
-                if producer.store.buffer.same_as(target) and is_global(p_load.buffer) and is_register_buffer(consumer.store.buffer) and c_load.buffer.same_as(target):
+                if producer.store.buffer.same_as(target) and is_global(p_load.buffer) and _is_register_buffer(consumer.store.buffer) and c_load.buffer.same_as(target):
                     candidate = _make_consumer_store(consumer, producer, p_load.buffer)
                     if candidate is not None:
                         input_pair = (p_idx, c_idx, candidate)
-                if producer.store.buffer.same_as(target) and is_register_buffer(p_load.buffer) and is_global(consumer.store.buffer) and c_load.buffer.same_as(target):
+                if producer.store.buffer.same_as(target) and _is_register_buffer(p_load.buffer) and is_global(consumer.store.buffer) and c_load.buffer.same_as(target):
                     candidate = _make_consumer_store(consumer, producer, p_load.buffer)
                     if candidate is not None:
                         output_pair = (p_idx, c_idx, candidate)
@@ -232,15 +265,36 @@ class _StagingMutator(PyStmtExprMutator):
         return result
 
 
+@tirx.functor.mutator
 class _CleanupMutator(PyStmtExprMutator):
     def __init__(self, removable: set[Buffer]):
         super().__init__()
         self.removable = removable
 
+    def visit_sblock_(self, op: tirx.SBlock) -> Stmt:
+        new_alloc = [b for b in op.alloc_buffers if not any(b.same_as(rem) for rem in self.removable)]
+        new_body = self.visit_stmt(op.body)
+        return tirx.SBlock(
+            op.iter_vars,
+            op.reads,
+            op.writes,
+            op.name_hint,
+            new_body,
+            op.init,
+            new_alloc,
+            op.match_buffers,
+            op.annotations,
+        )
+
     def visit_alloc_buffer_(self, op):
         if any(op.buffer.same_as(buffer) for buffer in self.removable):
             return Evaluate(0)
-        return op
+        return super().visit_alloc_buffer_(op)
+
+    def visit_decl_buffer_(self, op):
+        if any(op.buffer.same_as(buffer) for buffer in self.removable):
+            return self.visit_stmt(op.body)
+        return super().visit_decl_buffer_(op)
 
 
 def EliminateRedundantSharedStaging():
