@@ -84,10 +84,11 @@ fall back to their own policy instead of trusting an unmeasured guess.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 __all__ = ["SqmmaConfig", "recommend_sqmma_config",
-           "recommend_copy_channel"]
+           "recommend_copy_channel", "predict_sqmma_occupancy",
+           "predict_sqmma_wave_efficiency"]
 
 _TILE_128_MIN_MN = 1_800_000
 _TILE_128_RELAXED_MN = 1_600_000
@@ -190,3 +191,65 @@ def recommend_copy_channel(tile_bytes: int) -> str:
     if tile_bytes <= 0:
         raise ValueError(f"tile_bytes must be positive, got {tile_bytes}")
     return "tme" if tile_bytes >= _TME_BREAK_EVEN_BYTES else "direct"
+
+
+def predict_sqmma_occupancy(config: SqmmaConfig, dtype: str = "float16") -> dict[str, Any]:
+    """Derive theoretical MP31 SM occupancy and resource limits for an SQMMA configuration."""
+    dtype_bytes = 2 if dtype in ("float16", "fp16", "bfloat16", "bf16") else 4
+    shared_bytes = (config.block_m * config.block_k + config.block_k * config.block_n) * dtype_bytes * config.stages
+    
+    # Warps
+    warps_per_block = config.threads // 32
+    limit_by_warps = 32 // warps_per_block if warps_per_block > 0 else 0
+    
+    # Shared memory (192 KB total SMEM)
+    smem_total = 192 * 1024
+    limit_by_smem = smem_total // shared_bytes if shared_bytes > 0 else 16
+    
+    # Registers (64K registers per SM)
+    acc_per_thread = (config.block_m * config.block_n) // config.threads
+    est_regs_per_thread = acc_per_thread + 32
+    limit_by_regs = 65536 // (config.threads * est_regs_per_thread) if (config.threads * est_regs_per_thread) > 0 else 16
+    
+    active_blocks = min(limit_by_warps, limit_by_smem, limit_by_regs, 16)
+    active_warps = active_blocks * warps_per_block
+    occupancy = active_warps / 32.0
+    
+    return {
+        "shared_bytes": shared_bytes,
+        "acc_per_thread": acc_per_thread,
+        "estimated_regs_per_thread": est_regs_per_thread,
+        "active_blocks_per_sm": active_blocks,
+        "active_warps_per_sm": active_warps,
+        "theoretical_occupancy": occupancy,
+        "limit_by_warps": limit_by_warps,
+        "limit_by_smem": limit_by_smem,
+        "limit_by_regs": limit_by_regs,
+    }
+
+
+def predict_sqmma_wave_efficiency(m: int, n: int, config: SqmmaConfig, num_mps: int = 128) -> dict[str, Any]:
+    """Derive full-machine wave quantization efficiency across S5000 128 MPs."""
+    import math
+    grid_m = math.ceil(m / config.block_m)
+    grid_n = math.ceil(n / config.block_n)
+    grid_blocks = grid_m * grid_n
+    
+    occ = predict_sqmma_occupancy(config)
+    active_blocks = max(1, occ["active_blocks_per_sm"])
+    concurrent_capacity = num_mps * active_blocks
+    
+    num_waves = math.ceil(grid_blocks / concurrent_capacity)
+    wave_efficiency = grid_blocks / (num_waves * concurrent_capacity) if num_waves > 0 else 1.0
+    tail_blocks = grid_blocks - (num_waves - 1) * concurrent_capacity
+    tail_active_sms = math.ceil(tail_blocks / active_blocks)
+    
+    return {
+        "grid_blocks": grid_blocks,
+        "concurrent_capacity": concurrent_capacity,
+        "num_waves": num_waves,
+        "wave_efficiency": wave_efficiency,
+        "tail_active_sms": tail_active_sms,
+        "idle_sms_in_tail_wave": max(0, num_mps - tail_active_sms),
+    }
+
