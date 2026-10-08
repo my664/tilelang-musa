@@ -15,7 +15,36 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
 )
 
 
+def _plan_copy_pipeline(mod: IRModule) -> IRModule:
+    """Keep an explicitly synchronous copy policy during software pipelining.
+
+    Without this, PipelinePlanning converts a sync candidate to cp.async and
+    may fail vector injection or silently benchmark a different copy channel.
+    Explicit TME kernels carry their own ring/barrier schedule.
+    """
+    planned = IRModule(mod.functions, attrs=mod.attrs)
+    for gv, func in mod.functions.items():
+        single = IRModule({gv: func})
+        if func.attrs and func.attrs.get("mp31_copy_channel") == "sync":
+            context = tilelang.transform.get_pass_context()
+            config = dict(context.config)
+            config["tirx.use_async_copy"] = False
+            with tilelang.tvm.transform.PassContext(opt_level=context.opt_level,
+                                                    config=config,
+                                                    disabled_pass=list(context.disabled_pass)):
+                single = tilelang.transform.PipelinePlanning()(single)
+        else:
+            single = tilelang.transform.PipelinePlanning()(single)
+        planned[gv] = single[gv]
+    return planned
+
+
 def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
+    from tilelang.musa.target import target_is_mp31
+    from tilelang.musa.op.gemm.kernel import auto_tile_global_gemm
+
+    if target_is_mp31(target):
+        mod = auto_tile_global_gemm(mod)
     mod = tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     pass_ctx = tilelang.transform.get_pass_context()
@@ -31,9 +60,13 @@ def MUSAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LayoutReducer()(mod)
 
     mod = tilelang.transform.IfStmtBinding()(mod)
-    mod = tilelang.transform.PipelinePlanning()(mod)
+    mod = _plan_copy_pipeline(mod)
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
+
+    if target_is_mp31(target):
+        from tilelang.musa.op.gemm.tme_layout import prepare_tme_sqmma_layout
+        mod = prepare_tme_sqmma_layout(mod)
 
     mod = tilelang.transform.LayoutInference()(mod)
     LayoutVisual(mod)

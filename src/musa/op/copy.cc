@@ -233,7 +233,18 @@ LoweredTMEDesc MakeTmaDescriptor(const Buffer &global_buffer,
   const size_t rank = global_range.size();
   ICHECK_GE(rank, 1U);
   ICHECK_LE(rank, 5U);
-  ICHECK_EQ(shared_range.size(), rank);
+  ICHECK_GE(shared_range.size(), rank);
+  // Software pipelines add leading shared storage versions. These select a
+  // single DMA destination slot, not dimensions in the global descriptor.
+  const size_t leading = shared_range.size() - rank;
+  for (size_t i = 0; i < leading; ++i) {
+    ICHECK(analyzer->CanProveEqual(shared_range[i]->extent, Integer(1)))
+        << "MP31 TME leading shared stage dimensions must select one slot";
+  }
+  Array<Range> tile_range;
+  for (size_t i = leading; i < shared_range.size(); ++i) {
+    tile_range.push_back(shared_range[i]);
+  }
 
   // TME descriptors are expressed in bytes and use the innermost dimension
   // first. Restrict the first vertical slice to a row-major contiguous tile;
@@ -243,7 +254,7 @@ LoweredTMEDesc MakeTmaDescriptor(const Buffer &global_buffer,
   // Keep the descriptor's true global shape while the TME box follows the
   // normalized shared tile. Coordinates plus box dimensions may cross the
   // descriptor boundary; MP31 then fills those load elements with zero.
-  Array<PrimExpr> box_dims = ReverseRanges(shared_range, true);
+  Array<PrimExpr> box_dims = ReverseRanges(tile_range, true);
   Array<PrimExpr> global_stride;
   if (!global_buffer->strides.empty()) {
     global_stride = Reverse(global_buffer->strides);
@@ -276,7 +287,7 @@ LoweredTMEDesc MakeTmaDescriptor(const Buffer &global_buffer,
 
   for (size_t i = 0; i < rank; ++i) {
     ICHECK(analyzer->CanProveEqual(global_range[rank - i - 1]->extent,
-                                   shared_range[rank - i - 1]->extent))
+                                   tile_range[rank - i - 1]->extent))
         << "MP31 TME requires matching global/shared tile extents";
   }
 
@@ -306,12 +317,15 @@ PrimExpr MakeTmaSharedPtr(const Buffer &shared_buffer,
                           const Array<Range> &shared_range, int rw_mask) {
   PrimExpr shared_offset = 0;
   PrimExpr stride = 1;
-  for (auto it = shared_range.rbegin(); it != shared_range.rend(); ++it) {
-    shared_offset += (*it)->min * stride;
-    stride *= (*it)->extent;
+  PrimExpr extent = 1;
+  ICHECK_EQ(shared_range.size(), shared_buffer->shape.size());
+  for (size_t i = shared_range.size(); i != 0; --i) {
+    shared_offset += shared_range[i - 1]->min * stride;
+    stride *= shared_buffer->shape[i - 1];
+    extent *= shared_range[i - 1]->extent;
   }
   return shared_buffer.access_ptr(rw_mask, DataType::Handle(), 1,
-                                  shared_offset, stride);
+                                  shared_offset, extent);
 }
 
 Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
@@ -328,7 +342,9 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
 
   LoweredTMEDesc lowered = MakeTmaDescriptor(
       op.src, op.src_range, op.dst_range, analyzer);
-  PrimExpr shared_ptr = MakeTmaSharedPtr(op.dst, op.dst_range, /*rw_mask=*/2);
+  Buffer shared = args.buffer_remap.count(op.dst)
+                      ? args.buffer_remap.at(op.dst) : op.dst;
+  PrimExpr shared_ptr = MakeTmaSharedPtr(shared, op.dst_range, /*rw_mask=*/2);
 
   Array<PrimExpr> tma_args;
   tma_args.push_back(lowered.descriptor);
@@ -365,7 +381,9 @@ Stmt LowerTmaStore(const CopyNode &op, const LowerArgs &args,
 
   LoweredTMEDesc lowered = MakeTmaDescriptor(
       op.dst, op.dst_range, op.src_range, analyzer);
-  PrimExpr shared_ptr = MakeTmaSharedPtr(op.src, op.src_range, /*rw_mask=*/1);
+  Buffer shared = args.buffer_remap.count(op.src)
+                      ? args.buffer_remap.at(op.src) : op.src;
+  PrimExpr shared_ptr = MakeTmaSharedPtr(shared, op.src_range, /*rw_mask=*/1);
 
   Array<PrimExpr> tma_args;
   tma_args.push_back(lowered.descriptor);

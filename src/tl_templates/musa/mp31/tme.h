@@ -41,6 +41,36 @@ TL_DEVICE void tme_barrier_wait(int barrier_id, int phase_id) {
   barrier.wait(phase_id);
 }
 
+// The available TME wrapper loads SG_NONE while SQMMA operands use a 256-byte
+// XOR layout. Convert the completed tile in place, without a second shared
+// allocation or unverified SDK enum. XOR is an involution within each line;
+// exactly one owner swaps each pair. All CTA threads must call this helper.
+template <int ElementBytes, int GranularityBytes, int TileBytes>
+TL_DEVICE void tme_sqmma_swizzle_inplace(void *tile) {
+  static_assert(ElementBytes == 1 || ElementBytes == 2 || ElementBytes == 4);
+  static_assert(GranularityBytes == 16 || GranularityBytes == 32 ||
+                GranularityBytes == 64);
+  static_assert(TileBytes % 256 == 0);
+  auto *bytes = static_cast<unsigned char *>(tile);
+  __syncthreads();
+  for (int offset = threadIdx.x * ElementBytes; offset < TileBytes;
+       offset += blockDim.x * ElementBytes) {
+    int line = offset / 256;
+    int inside = offset % 256;
+    int partner = line * 256 +
+        ((inside / GranularityBytes) ^ (line % (256 / GranularityBytes))) *
+            GranularityBytes + inside % GranularityBytes;
+    if (offset < partner) {
+      for (int byte = 0; byte < ElementBytes; ++byte) {
+        unsigned char saved = bytes[offset + byte];
+        bytes[offset + byte] = bytes[partner + byte];
+        bytes[partner + byte] = saved;
+      }
+    }
+  }
+  __syncthreads();
+}
+
 TL_DEVICE void prefetch_tma_descriptor(
     const MUtensorDescriptor &descriptor) {
   // The installed MTCC exposes descriptor prefetch through the public
