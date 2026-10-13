@@ -25,6 +25,8 @@ def make_sqmma_gemm(m, n, k, *, dtype="float16", out_dtype="float32",
                                   config.threads, config.stages)
     if any(x <= 0 for x in (bm, bn, bk, threads, stages)):
         raise ValueError("Tile, threads and stages must be positive")
+    if channel == "cp_async" and stages < 2:
+        raise ValueError("MP31 cp_async requires at least two pipeline stages")
     if bm % 16 or bn % 16 or bk % 16 or threads % 128 or threads > 1024:
         raise ValueError("MP31 tile alignment or 128-thread squad alignment is invalid")
     if m % bm or n % bn or k % bk:
@@ -33,15 +35,15 @@ def make_sqmma_gemm(m, n, k, *, dtype="float16", out_dtype="float32",
         raise ValueError("MP31 source-only accumulator budget exceeds 64 per thread")
     if stages * (bm + bn) * bk * 2 > 160 * 1024:
         raise ValueError("MP31 shared ring exceeds 160 KiB per block")
-    if channel not in ("sync", "tme"):
-        raise ValueError("Copy channel must be sync or tme")
+    if channel not in ("sync", "cp_async", "tme"):
+        raise ValueError("Copy channel must be sync, cp_async or tme")
     a_shape = (k, m) if transpose_a else (m, k)
     b_shape = (n, k) if transpose_b else (k, n)
     a_tile = (bk, bm) if transpose_a else (bm, bk)
     b_tile = (bn, bk) if transpose_b else (bk, bn)
     iters = k // bk
 
-    if channel == "sync":
+    if channel in ("sync", "cp_async"):
         @T.prim_func
         def kernel(A: T.Tensor(a_shape, dtype), B: T.Tensor(b_shape, dtype),
                    C: T.Tensor((m, n), out_dtype)):
@@ -105,7 +107,9 @@ def make_sqmma_gemm(m, n, k, *, dtype="float16", out_dtype="float32",
                             T.tma_copy(B[(ko + stages) * bk:(ko + stages + 1) * bk, bx * bn:(bx + 1) * bn], sb[slot, :, :], barrier=barriers[slot])
                         T.barrier_arrive(barriers[slot])
                 T.copy(acc, C[by * bm, bx * bn])
-    return kernel.with_attr("mp31_auto_config", config.as_dict()).with_attr("mp31_copy_channel", channel)
+    return (kernel.with_attr("mp31_auto_config", config.as_dict())
+            .with_attr("mp31_copy_channel", channel)
+            .with_attr("mp31_pipeline_async", channel == "cp_async"))
 
 
 def auto_tile_global_gemm(mod):

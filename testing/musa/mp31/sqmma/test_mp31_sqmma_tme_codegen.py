@@ -55,6 +55,26 @@ class TestMP31SourceOnly(unittest.TestCase):
             self.assertNotIn("cp_async", source)
             self.assertNotIn("tme_load", source)
 
+    def test_cp_async_is_explicit_and_uses_group_protocol(self):
+        kernel = make_sqmma_gemm(
+            128, 256, 256,
+            config=SqmmaConfig(64, 64, 64, 256, 2),
+            channel="cp_async",
+        )
+        source = lower(kernel).kernel_source
+        self.assertIn("tl::cp_async_gs<", source)
+        self.assertIn("tl::cp_async_commit()", source)
+        self.assertIn("tl::cp_async_wait<", source)
+        self.assertNotIn("mp31_copy_channel", source)
+
+    def test_cp_async_requires_multiple_stages(self):
+        with self.assertRaisesRegex(ValueError, "at least two pipeline stages"):
+            make_sqmma_gemm(
+                128, 128, 128,
+                config=SqmmaConfig(64, 64, 64, 256, 1),
+                channel="cp_async",
+            )
+
     def test_swizzle_is_bijective_involution(self):
         # Match the compiler's physical layout formula, including bf16/fp16
         # and K-major versus MN-major operand granularity. Every byte belongs

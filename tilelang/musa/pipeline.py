@@ -25,7 +25,11 @@ def _plan_copy_pipeline(mod: IRModule) -> IRModule:
     planned = IRModule(mod.functions, attrs=mod.attrs)
     for gv, func in mod.functions.items():
         single = IRModule({gv: func})
-        if func.attrs and func.attrs.get("mp31_copy_channel") == "sync":
+        # Keep the measured default synchronous. A mechanism probe opts into
+        # the SDK group protocol explicitly through the kernel attribute.
+        use_async = bool(func.attrs and
+                         func.attrs.get("mp31_pipeline_async", False))
+        if func.attrs and func.attrs.get("mp31_copy_channel") == "sync" and not use_async:
             context = tilelang.transform.get_pass_context()
             config = dict(context.config)
             config["tirx.use_async_copy"] = False
