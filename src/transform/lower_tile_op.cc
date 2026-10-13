@@ -23,6 +23,7 @@
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
 #include "../op/utils.h"
+#include "backend/common/target_utils.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
 
@@ -1483,7 +1484,12 @@ private:
     // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
     // lowering does not require converting eligible global->shared copies to
     // `tir.ptx_cp_async`.
-    if (TargetCudaHasAsyncCopy(target_)) {
+    // Async-copy injection is shared by CUDA and MUSA backends.  The old
+    // CUDA-only capability check silently skipped this step for MP31, so an
+    // explicitly async MUSA pipeline reached codegen as ordinary vectorized
+    // loads/stores.  Use the backend-neutral capability query here; it still
+    // rejects targets without hardware async-copy support.
+    if (TargetHasAsyncCopy(target_)) {
       tvm::transform::PassContext ctx = tvm::transform::PassContext::Current();
       bool auto_async_copy_enabled =
           ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
