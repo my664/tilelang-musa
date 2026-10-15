@@ -5,7 +5,7 @@ the measured fp16 planner, or the same legal geometry for bf16 (unmeasured).
 TME uses a bounded rotating ring: consume/wait, CTA reuse fence, then refill.
 """
 from tilelang import language as T
-from .planner import SqmmaConfig, recommend_sqmma_config
+from .planner import SqmmaConfig, recommend_copy_channel, recommend_sqmma_config
 
 
 def make_sqmma_gemm(m, n, k, *, dtype="float16", out_dtype="float32",
@@ -64,7 +64,13 @@ def make_sqmma_gemm(m, n, k, *, dtype="float16", out_dtype="float32",
                         T.copy(B[bx * bn, ko * bk], sb)
                     else:
                         T.copy(B[ko * bk, bx * bn], sb)
-                    T.gemm(sa, sb, acc, transpose_A=transpose_a, transpose_B=transpose_b, policy=policy)
+                    # This constructor is explicitly the MP31 SQMMA path.  Do
+                    # not route it through generic T.gemm instruction
+                    # selection: deployed native runtimes may deliberately
+                    # disable automatic MUSA GEMM selection, while the
+                    # SQMMA layout/lowering below is already fully explicit.
+                    T.sqmma_gemm(sa, sb, acc, transpose_A=transpose_a,
+                                 transpose_B=transpose_b, policy=policy)
                 T.copy(acc, C[by * bm, bx * bn])
     else:
         @T.prim_func
@@ -92,8 +98,9 @@ def make_sqmma_gemm(m, n, k, *, dtype="float16", out_dtype="float32",
                 for ko in T.serial(iters):
                     slot = ko % stages
                     T.barrier_wait(barriers[slot], (ko // stages) % 2)
-                    T.gemm(sa[slot, :, :], sb[slot, :, :], acc,
-                           transpose_A=transpose_a, transpose_B=transpose_b, policy=policy)
+                    T.sqmma_gemm(sa[slot, :, :], sb[slot, :, :], acc,
+                                 transpose_A=transpose_a,
+                                 transpose_B=transpose_b, policy=policy)
                     # Every squad must finish reading the slot before refilling.
                     T.sync_threads()
                     if ko + stages < iters:
@@ -152,8 +159,30 @@ def auto_tile_global_gemm(mod):
                 raise ValueError("MP31 automatic GEMM does not support aliased operands")
             config_attr = func.attrs.get("mp31_tile_config") if func.attrs else None
             config = SqmmaConfig(**{str(key): int(value) for key, value in config_attr.items()}) if config_attr else None
+            channel_attr = func.attrs.get("mp31_copy_channel") if func.attrs else None
+            if channel_attr is not None:
+                channel = str(channel_attr)
+            else:
+                # Select the transfer mechanism from the staged tile size.
+                # This keeps the policy shape-independent: small tiles retain
+                # direct loads, while tiles at the measured MP31 TME
+                # break-even use the hardware copy engine.  Explicit
+                # make_sqmma_gemm(..., channel=...) calls remain unchanged.
+                dtype_name = str(buffers[0].dtype)
+                selected = config or recommend_sqmma_config(
+                    int(call.args[5]), int(call.args[6]), int(call.args[7]),
+                    dtype=dtype_name,
+                )
+                if selected is None:
+                    channel = "sync"
+                else:
+                    element_bytes = 2 if dtype_name in ("float16", "bfloat16") else 4
+                    staged_bytes = (selected.block_m * selected.block_k +
+                                    selected.block_k * selected.block_n) * element_bytes
+                    channel = recommend_copy_channel(staged_bytes)
             new = make_sqmma_gemm(int(call.args[5]), int(call.args[6]), int(call.args[7]),
                                   dtype=buffers[0].dtype, config=config,
+                                  channel=channel,
                                   clear_accum=bool(call.args[9]),
                                   transpose_a=bool(call.args[3]), transpose_b=bool(call.args[4]), policy=call.args[8])
             # Keep the caller's ABI even if its parameters are not ordered A,B,C.
