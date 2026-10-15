@@ -44,4 +44,15 @@ __device__ inline dim3 rasterization2DColumn() {
   return {col_idx, row_idx, blockIdx.z};
 }
 
+template <int swizzle_width>
+__device__ inline dim3 swizzle2D() {
+  const unsigned int block_id = blockIdx.y * gridDim.x + blockIdx.x;
+  const unsigned int num_blocks_per_group = swizzle_width * gridDim.y;
+  const unsigned int group_id = block_id / num_blocks_per_group;
+  const unsigned int group_offset = block_id % num_blocks_per_group;
+  const unsigned int bx = group_id * swizzle_width + (group_offset % swizzle_width);
+  const unsigned int by = group_offset / swizzle_width;
+  return {bx, by, blockIdx.z};
+}
+
 }  // namespace tl

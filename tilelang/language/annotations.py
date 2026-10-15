@@ -26,6 +26,8 @@ def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
         device_func = "rasterization2DColumn"
     elif order == "mlx":
         device_func = "rasterization2DMLX"
+    elif order in ("swizzle", "swizzle2D"):
+        device_func = "swizzle2D"
     else:
         raise ValueError(f"Unsupported swizzle order: {order}")
     if not enable:

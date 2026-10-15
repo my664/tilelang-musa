@@ -1253,6 +1253,14 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         e.scope = StorageScope::Create(s);
         curr_stmt_.access.emplace_back(std::move(e));
       }
+    } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
+      if (allow_append_) {
+        AccessEntry e{.cset = {constr_stack_}};
+        e.threads = env_threads();
+        e.type = kSync;
+        e.scope = StorageScope::Create("shared");
+        curr_stmt_.access.emplace_back(std::move(e));
+      }
     } else {
       ConstrVisitor::VisitExpr_(op);
     }
