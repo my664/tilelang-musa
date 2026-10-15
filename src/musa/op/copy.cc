@@ -55,6 +55,11 @@ bool IsExplicitTmaCopy(const CopyNode &op) {
       return flag->value != 0;
     }
   }
+  if (auto value = op.annotations.Get("is_tme_copy")) {
+    if (const auto *flag = value->as<IntImmNode>()) {
+      return flag->value != 0;
+    }
+  }
   return false;
 }
 
