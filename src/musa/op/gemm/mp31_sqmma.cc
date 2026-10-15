@@ -105,6 +105,10 @@ const std::vector<SQMMAShapeMN> &GetMNCandidates(SQMMATypeClass type_class) {
       {128, 128}, {128, 64}, {128, 32}, {64, 128}, {64, 64}, {64, 32},
       {64, 16},   {32, 128}, {32, 64},  {32, 32},  {16, 64},
   };
+  static const std::vector<SQMMAShapeMN> kFP16 = {
+      {128, 64}, {128, 32}, {64, 128}, {64, 64}, {64, 32},
+      {64, 16},  {32, 128}, {32, 64},  {32, 32}, {16, 64},
+  };
   static const std::vector<SQMMAShapeMN> kTF32 = {
       {128, 128}, {128, 64}, {64, 64}, {64, 32},
       {64, 16},   {32, 64},  {32, 32}, {16, 64},
@@ -119,6 +123,9 @@ const std::vector<SQMMAShapeMN> &GetMNCandidates(SQMMATypeClass type_class) {
   };
 
   switch (type_class) {
+  case SQMMATypeClass::kFP16:
+  case SQMMATypeClass::kBF16:
+    return kFP16;
   case SQMMATypeClass::kTF32:
     return kTF32;
   case SQMMATypeClass::kFloatInt8:
@@ -230,8 +237,13 @@ SQMMA::ComputeWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
       << "MP31 SQMMA N must be divisible by " << kNPerWarp << ", got " << N;
 
   auto is_valid = [&](int m, int n) {
-    return m * n == num_warps && m % kWarpGroupSize == 0 &&
-           M % (m * kMPerWarp) == 0 && N % (n * kNPerWarp) == 0;
+    bool base_valid = m * n == num_warps && m % kWarpGroupSize == 0 &&
+                      M % (m * kMPerWarp) == 0 && N % (n * kNPerWarp) == 0;
+    if (!base_valid) return false;
+    if (num_warps >= 8 && M >= 256) {
+      return (M / (m / kWarpGroupSize)) <= 128;
+    }
+    return true;
   };
 
   int m_warp = 0;
@@ -322,17 +334,19 @@ Array<Integer> SQMMA::GetInstShape(const GemmNode &op, int block_size,
   // (squad {128,128} always implies acc = 128); the largest usable native
   // shape is {128,64} with acc = 64 (>= 256 threads for a 128x128 block).
   if ((*type_class == SQMMATypeClass::kFP16 ||
-       *type_class == SQMMATypeClass::kBF16) &&
-      (*shape)[0] >= 128 && (*shape)[1] >= 64) {
-    const int64_t acc_per_thread = tile.m * tile.n / 128;
-    ICHECK_LE(acc_per_thread, 64)
+       *type_class == SQMMATypeClass::kBF16)) {
+    const int64_t inst_acc =
+        static_cast<int64_t>((*shape)[0]) * (*shape)[1] / 128;
+    ICHECK_LE(inst_acc, 64)
+        << "MP31 SQMMA native instruction " << (*shape)[0] << "x" << (*shape)[1]
+        << " needs " << inst_acc
+        << " fp32 accumulators per thread, but native instruction allows at most 64 "
+        << "before device register allocation fails (TEMP_2048).";
+    const int64_t total_acc = tile.m * tile.n / 128;
+    ICHECK_LE(total_acc, 128)
         << "MP31 SQMMA tile M=" << op.m_ << ", N=" << op.n_ << " with "
-        << block_size << " threads needs " << acc_per_thread
-        << " fp32 accumulators per thread, but native instruction "
-        << (*shape)[0] << "x" << (*shape)[1]
-        << " only allows 64 before device register allocation fails. "
-        << "Increase block threads (128x128 needs 256 threads) or shrink the "
-        << "tile.";
+        << block_size << " threads needs " << total_acc
+        << " fp32 accumulators per thread, exceeding maximum 128.";
   }
   return {Integer((*shape)[0]), Integer((*shape)[1]), Integer((*shape)[2])};
 }

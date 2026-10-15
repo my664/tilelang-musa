@@ -137,6 +137,7 @@ class SqmmaConfig:
         }
 
 
+_CONFIG_256 = SqmmaConfig(256, 128, 64, 256, 1)
 _CONFIG_128 = SqmmaConfig(128, 128, 64, 256, 1)
 _CONFIG_64 = SqmmaConfig(64, 64, 64, 128, 1)
 
@@ -163,6 +164,8 @@ def recommend_sqmma_config(m: int, n: int, k: int,
         return None
 
     mn = m * n
+    if _divides(m, 256) and _divides(n, 128) and (mn >= 4_000_000 or (m >= 2048 and n >= 2048)):
+        return _CONFIG_256
     if _divides(m, 128) and _divides(n, 128):
         if mn >= _TILE_128_MIN_MN:
             return _CONFIG_128

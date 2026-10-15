@@ -10,7 +10,8 @@ from .planner import SqmmaConfig, recommend_sqmma_config
 
 def make_sqmma_gemm(m, n, k, *, dtype="float16", out_dtype="float32",
                     config=None, channel="sync", clear_accum=True,
-                    transpose_a=False, transpose_b=False, policy=None):
+                    transpose_a=False, transpose_b=False, policy=None,
+                    swizzle_panel=None):
     policy = T.GemmWarpPolicy.Square if policy is None else policy
     if any(not isinstance(x, int) or x <= 0 or x % 64 for x in (m, n, k)):
         raise ValueError("MP31 automatic GEMM requires positive static M/N/K multiples of 64")
@@ -31,8 +32,8 @@ def make_sqmma_gemm(m, n, k, *, dtype="float16", out_dtype="float32",
         raise ValueError("MP31 tile alignment or 128-thread squad alignment is invalid")
     if m % bm or n % bn or k % bk:
         raise ValueError("Explicit tiles must divide the problem dimensions")
-    if (bm * bn + threads - 1) // threads > 64:
-        raise ValueError("MP31 source-only accumulator budget exceeds 64 per thread")
+    if (bm * bn + threads - 1) // threads > 128:
+        raise ValueError("MP31 source-only accumulator budget exceeds 128 per thread")
     if stages * (bm + bn) * bk * 2 > 160 * 1024:
         raise ValueError("MP31 shared ring exceeds 160 KiB per block")
     if channel not in ("sync", "cp_async", "tme"):
@@ -43,11 +44,17 @@ def make_sqmma_gemm(m, n, k, *, dtype="float16", out_dtype="float32",
     b_tile = (bn, bk) if transpose_b else (bk, bn)
     iters = k // bk
 
+    if swizzle_panel is None:
+        grid_n = n // bn
+        swizzle_panel = 4 if (m * n >= 1_800_000 and grid_n >= 4) else 1
+
     if channel in ("sync", "cp_async"):
         @T.prim_func
         def kernel(A: T.Tensor(a_shape, dtype), B: T.Tensor(b_shape, dtype),
                    C: T.Tensor((m, n), out_dtype)):
             with T.Kernel(n // bn, m // bm, threads=threads) as (bx, by):
+                if swizzle_panel > 1:
+                    T.use_swizzle(panel_size=swizzle_panel, order="column")
                 sa = T.alloc_shared(a_tile, dtype)
                 sb = T.alloc_shared(b_tile, dtype)
                 acc = T.alloc_fragment((bm, bn), "float32")
@@ -71,6 +78,8 @@ def make_sqmma_gemm(m, n, k, *, dtype="float16", out_dtype="float32",
         def kernel(A: T.Tensor(a_shape, dtype), B: T.Tensor(b_shape, dtype),
                    C: T.Tensor((m, n), out_dtype)):
             with T.Kernel(n // bn, m // bm, threads=threads) as (bx, by):
+                if swizzle_panel > 1:
+                    T.use_swizzle(panel_size=swizzle_panel, order="column")
                 sa = T.alloc_shared((stages, *a_tile), dtype)
                 sb = T.alloc_shared((stages, *b_tile), dtype)
                 barriers = T.alloc_barrier([threads] * stages)
