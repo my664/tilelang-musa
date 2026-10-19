@@ -1211,11 +1211,12 @@ void CodeGenMUSA::VisitExpr_(const CallNode* op, std::ostream& os) {
     os << ")";
   } else if (op->op.same_as(tl::tma_load())) {
     // MP31 TME load arguments are descriptor, barrier, shared pointer,
-    // rank coordinates and rank box dimensions.  The MP31 template exposes
-    // rank-specific overloads, so keep this emission independent of T.copy.
+    // rank coordinates and rank box dimensions, plus optional swizzle granularity.
+    // The MP31 template exposes rank-specific overloads, so keep this emission
+    // independent of T.copy.
     ICHECK_GE(op->args.size(), 5U);
-    ICHECK_EQ((op->args.size() - 3) % 2, 0U);
-    size_t rank = (op->args.size() - 3) / 2;
+    bool has_swizzle = ((op->args.size() - 3) % 2 == 1U);
+    size_t rank = (op->args.size() - 3 - (has_swizzle ? 1 : 0)) / 2;
     ICHECK_GE(rank, 1U);
     ICHECK_LE(rank, 5U);
     need_mp31_tme_h_ = true;
@@ -1224,7 +1225,31 @@ void CodeGenMUSA::VisitExpr_(const CallNode* op, std::ostream& os) {
       if (i != 0) {
         os << ", ";
       }
-      this->PrintExpr(op->args[i], os);
+      if (has_swizzle && i == op->args.size() - 1) {
+        if (const auto *imm = op->args[i].as<IntImmNode>()) {
+          switch (imm->value) {
+          case 1:
+            os << "__musa::SG_16B";
+            break;
+          case 2:
+            os << "__musa::SG_32B";
+            break;
+          case 3:
+            os << "__musa::SG_64B";
+            break;
+          case 4:
+            os << "__musa::SG_128B";
+            break;
+          default:
+            os << "__musa::SG_NONE";
+            break;
+          }
+        } else {
+          this->PrintExpr(op->args[i], os);
+        }
+      } else {
+        this->PrintExpr(op->args[i], os);
+      }
     }
     os << ")";
   } else if (op->op.same_as(tl::tma_load_im2col())) {

@@ -42,10 +42,11 @@ class TestMP31SourceOnly(unittest.TestCase):
                 T.gemm(sa, sb, acc)
                 T.copy(acc, C)
         src = lower(kernel).kernel_source
-        self.assertIn("tl::tme_sqmma_swizzle_inplace<2, 16, 8192>", src)
-        self.assertIn("tl::tme_sqmma_swizzle_inplace<2, 32, 8192>", src)
-        self.assertLess(src.index("tl::tme_barrier_wait("), src.index("tl::tme_sqmma_swizzle_inplace<"))
-        self.assertLess(src.index("tl::tme_sqmma_swizzle_inplace<"), src.index("tl::sqmma_ss<"))
+        self.assertIn("tl::tme_load(", src)
+        self.assertIn("__musa::SG_16B", src)
+        self.assertIn("__musa::SG_32B", src)
+        self.assertNotIn("tme_sqmma_swizzle_inplace", src)
+        self.assertLess(src.index("tl::tme_barrier_wait("), src.index("tl::sqmma_ss<"))
 
     def test_sync_stages_do_not_change_copy_channel(self):
         for stages in (2, 3, 4):
@@ -133,8 +134,9 @@ class TestMP31SourceOnly(unittest.TestCase):
                     self.assertIn("tl::" + symbol + "(", src)
                 self.assertEqual(src.count("tl::tme_barrier_init_arrival("), stages)
                 self.assertIn("tl_templates/musa/mp31/tme.h", src)
-                self.assertIn("tl::tme_sqmma_swizzle_inplace<2, 16, 8192>", src)
-                self.assertIn("tl::tme_sqmma_swizzle_inplace<2, 32, 8192>", src)
+                self.assertIn("__musa::SG_16B", src)
+                self.assertIn("__musa::SG_32B", src)
+                self.assertNotIn("tme_sqmma_swizzle_inplace", src)
                 # Consumer wait must precede tensor compute; a CTA fence must
                 # precede reuse of its operand storage for the next transaction.
                 wait = src.index("tl::tme_barrier_wait(")

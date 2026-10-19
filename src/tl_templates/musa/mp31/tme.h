@@ -41,34 +41,11 @@ TL_DEVICE void tme_barrier_wait(int barrier_id, int phase_id) {
   barrier.wait(phase_id);
 }
 
-// The available TME wrapper loads SG_NONE while SQMMA operands use a 256-byte
-// XOR layout. Convert the completed tile in place, without a second shared
-// allocation or unverified SDK enum. XOR is an involution within each line;
-// exactly one owner swaps each pair. All CTA threads must call this helper.
+// Swizzle is natively performed by hardware TME via SG_16B / SG_32B.
+// This helper is kept as a no-op for backward compatibility.
 template <int ElementBytes, int GranularityBytes, int TileBytes>
 TL_DEVICE void tme_sqmma_swizzle_inplace(void *tile) {
-  static_assert(ElementBytes == 1 || ElementBytes == 2 || ElementBytes == 4);
-  static_assert(GranularityBytes == 16 || GranularityBytes == 32 ||
-                GranularityBytes == 64);
-  static_assert(TileBytes % 256 == 0);
-  auto *bytes = static_cast<unsigned char *>(tile);
-  __syncthreads();
-  for (int offset = threadIdx.x * ElementBytes; offset < TileBytes;
-       offset += blockDim.x * ElementBytes) {
-    int line = offset / 256;
-    int inside = offset % 256;
-    int partner = line * 256 +
-        ((inside / GranularityBytes) ^ (line % (256 / GranularityBytes))) *
-            GranularityBytes + inside % GranularityBytes;
-    if (offset < partner) {
-      for (int byte = 0; byte < ElementBytes; ++byte) {
-        unsigned char saved = bytes[offset + byte];
-        bytes[offset + byte] = bytes[partner + byte];
-        bytes[partner + byte] = saved;
-      }
-    }
-  }
-  __syncthreads();
+  // No-op: handled by hardware TME swizzle
 }
 
 TL_DEVICE void prefetch_tma_descriptor(
@@ -95,56 +72,60 @@ TL_DEVICE void tme_load_im2col(const MUtensorDescriptor &descriptor,
 
 TL_DEVICE void tme_load(const MUtensorDescriptor &descriptor,
                         uint32_t barrier_id, void *smem_ptr, int coord0,
-                        int dim0) {
+                        int dim0, int sg = __musa::SG_NONE) {
   __musa::async_barrier barrier(barrier_id);
   __musa::memcpy_async(barrier, smem_ptr, &descriptor, dim0, coord0, 0,
-                       __musa::SG_NONE, __musa::SS_256B, __musa::SL_256B,
+                       sg, __musa::SS_256B, __musa::SL_256B,
                        __musa::SZ_NONE);
 }
 
 TL_DEVICE void tme_load(const MUtensorDescriptor &descriptor,
                         uint32_t barrier_id, void *smem_ptr, int coord0,
-                        int coord1, int dim0, int dim1) {
+                        int coord1, int dim0, int dim1,
+                        int sg = __musa::SG_NONE) {
   __musa::i2 coord = {coord0, coord1};
   __musa::i2 dims = {dim0, dim1};
   __musa::async_barrier barrier(barrier_id);
   __musa::memcpy_async(barrier, smem_ptr, &descriptor, dims, coord, 0,
-                       __musa::SG_NONE, __musa::SS_256B, __musa::SL_256B,
+                       sg, __musa::SS_256B, __musa::SL_256B,
                        __musa::SZ_NONE);
 }
 
 TL_DEVICE void tme_load(const MUtensorDescriptor &descriptor,
                         uint32_t barrier_id, void *smem_ptr, int coord0,
-                        int coord1, int coord2, int dim0, int dim1, int dim2) {
+                        int coord1, int coord2, int dim0, int dim1, int dim2,
+                        int sg = __musa::SG_NONE) {
   __musa::i3 coord = {coord0, coord1, coord2};
   __musa::i3 dims = {dim0, dim1, dim2};
   __musa::async_barrier barrier(barrier_id);
   __musa::memcpy_async(barrier, smem_ptr, &descriptor, dims, coord, 0,
-                       __musa::SG_NONE, __musa::SS_256B, __musa::SL_256B,
+                       sg, __musa::SS_256B, __musa::SL_256B,
                        __musa::SZ_NONE);
 }
 
 TL_DEVICE void tme_load(const MUtensorDescriptor &descriptor,
                         uint32_t barrier_id, void *smem_ptr, int coord0,
                         int coord1, int coord2, int coord3, int dim0,
-                        int dim1, int dim2, int dim3) {
+                        int dim1, int dim2, int dim3,
+                        int sg = __musa::SG_NONE) {
   __musa::i4 coord = {coord0, coord1, coord2, coord3};
   __musa::i4 dims = {dim0, dim1, dim2, dim3};
   __musa::async_barrier barrier(barrier_id);
   __musa::memcpy_async(barrier, smem_ptr, &descriptor, dims, coord, 0,
-                       __musa::SG_NONE, __musa::SS_256B, __musa::SL_256B,
+                       sg, __musa::SS_256B, __musa::SL_256B,
                        __musa::SZ_NONE);
 }
 
 TL_DEVICE void tme_load(const MUtensorDescriptor &descriptor,
                         uint32_t barrier_id, void *smem_ptr, int coord0,
                         int coord1, int coord2, int coord3, int coord4,
-                        int dim0, int dim1, int dim2, int dim3, int dim4) {
+                        int dim0, int dim1, int dim2, int dim3, int dim4,
+                        int sg = __musa::SG_NONE) {
   __musa::i5 coord = {coord0, coord1, coord2, coord3, coord4};
   __musa::i5 dims = {dim0, dim1, dim2, dim3, dim4};
   __musa::async_barrier barrier(barrier_id);
   __musa::memcpy_async(barrier, smem_ptr, &descriptor, dims, coord, 0,
-                       __musa::SG_NONE, __musa::SS_256B, __musa::SL_256B,
+                       sg, __musa::SS_256B, __musa::SL_256B,
                        __musa::SZ_NONE);
 }
 

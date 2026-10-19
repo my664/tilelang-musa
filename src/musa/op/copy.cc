@@ -359,6 +359,37 @@ Stmt LowerTmaLoad(const CopyNode &op, const LowerArgs &args,
                   lowered.global_coords.end());
   tma_args.insert(tma_args.end(), lowered.box_dims.begin(),
                   lowered.box_dims.end());
+
+  int sg_enum = 0;
+  if (auto swizzle_anno = op.annotations.Get("swizzle_granularity")) {
+    if (const auto *imm = swizzle_anno->as<IntImmNode>()) {
+      switch (imm->value) {
+      case 16:
+        sg_enum = 1; // __musa::SG_16B
+        break;
+      case 32:
+        sg_enum = 2; // __musa::SG_32B
+        break;
+      case 64:
+        sg_enum = 3; // __musa::SG_64B
+        break;
+      case 128:
+        sg_enum = 4; // __musa::SG_128B
+        break;
+      default:
+        sg_enum = 0;
+        break;
+      }
+    }
+  } else if (auto swizzle_mode = op.annotations.Get("swizzle_mode")) {
+    if (const auto *imm = swizzle_mode->as<IntImmNode>()) {
+      sg_enum = static_cast<int>(imm->value);
+    }
+  }
+  if (sg_enum != 0) {
+    tma_args.push_back(IntImm(DataType::Int(32), sg_enum));
+  }
+
   Stmt load = Evaluate(Call(DataType::Handle(), tma_load(), tma_args));
 
   PrimExpr bytes = 1;

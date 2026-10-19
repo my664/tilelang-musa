@@ -1,8 +1,9 @@
-"""Insert the SG_NONE-to-SQMMA layout conversion after DMA completion.
+"""Configure hardware TME layout and swizzle granularity for SQMMA operands.
 
 This is an AST transform, so user-written T.tma_copy + T.gemm kernels receive
-the same conversion as the automatic kernel builder. Ambiguous partial-tile or
-multi-wait protocols are rejected instead of silently consuming wrong layouts.
+the same hardware swizzle annotations as the automatic kernel builder.
+Ambiguous partial-tile or multi-wait protocols are rejected instead of silently
+consuming wrong layouts.
 """
 from tilelang import language as T
 from tvm import DataType, IRModule, tirx, arith
@@ -67,27 +68,24 @@ def prepare_tme_sqmma_layout(mod):
             raise ValueError("TME SQMMA requires one structured consumer wait per barrier")
 
         def rewrite(node):
-            if not isinstance(node, tirx.Evaluate) or not isinstance(node.value, tirx.Call):
+            if not isinstance(node, tirx.Call):
                 return None
-            call = node.value
-            if getattr(call.op, "name", "") != "tl.mbarrier_wait_parity" or not isinstance(call.args[0], tirx.BufferLoad):
+            if getattr(node.op, "name", "") != "tl.tileop.tma_copy":
                 return None
-            barrier = call.args[0]
-            entries = pending.get(barrier.buffer.data)
-            if entries is None:
+            dst = node.args[1]
+            buffer = dst.args[0].buffer
+            if buffer.data not in layouts:
                 return None
-            statements = [node]
-            for buffer, granularity in entries.values():
-                element_bytes = DataType(buffer.dtype).bits // 8
-                tile_bytes = int(buffer.shape[-2]) * int(buffer.shape[-1]) * element_bytes
-                if element_bytes not in (1, 2, 4) or granularity not in (16, 32, 64) or tile_bytes % 256:
-                    raise ValueError("TME SQMMA tile does not satisfy the 256-byte XOR layout contract")
-                indices = [barrier.indices[0], 0, 0] if len(buffer.shape) == 3 else [0, 0]
-                base = tirx.BufferLoad(buffer, indices)
-                pointer = T.access_ptr(base, "rw", extent=tile_bytes // element_bytes, ignore_last_ndim=2)
-                name = f"tl::tme_sqmma_swizzle_inplace<{element_bytes}, {granularity}, {tile_bytes}>"
-                statements.append(tirx.Evaluate(tirx.call_extern("handle", name, pointer)))
-            return tirx.SeqStmt(statements)
-        body = tirx.stmt_functor.ir_transform(func.body, None, rewrite, ["tirx.Evaluate"])
+            granularity = layouts[buffer.data]
+            element_bytes = DataType(buffer.dtype).bits // 8
+            tile_bytes = int(buffer.shape[-2]) * int(buffer.shape[-1]) * element_bytes
+            if element_bytes not in (1, 2, 4) or granularity not in (16, 32, 64) or tile_bytes % 256:
+                raise ValueError("TME SQMMA tile does not satisfy the 256-byte XOR layout contract")
+            annotations = dict(node.annotations) if node.annotations else {}
+            annotations["swizzle_granularity"] = tirx.IntImm("int32", granularity)
+            return tirx.Call(node.dtype, node.op, node.args, annotations, node.span)
+
+        body = tirx.stmt_functor.ir_transform(func.body, None, rewrite, ["tirx.Call"])
         result[gv] = func.with_body(body)
     return result
+
