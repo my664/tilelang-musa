@@ -59,7 +59,7 @@ class TestMP31SourceOnly(unittest.TestCase):
     def test_cp_async_is_explicit_and_uses_group_protocol(self):
         kernel = make_sqmma_gemm(
             128, 256, 256,
-            config=SqmmaConfig(64, 64, 64, 256, 2),
+            config=SqmmaConfig(64, 64, 64, 128, 2),
             channel="cp_async",
         )
         source = lower(kernel).kernel_source

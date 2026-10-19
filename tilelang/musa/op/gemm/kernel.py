@@ -32,10 +32,13 @@ def make_sqmma_gemm(m, n, k, *, dtype="float16", out_dtype="float32",
         raise ValueError("MP31 tile alignment or 128-thread squad alignment is invalid")
     if m % bm or n % bn or k % bk:
         raise ValueError("Explicit tiles must divide the problem dimensions")
-    if (bm * bn + threads - 1) // threads > 128:
-        raise ValueError("MP31 source-only accumulator budget exceeds 128 per thread")
+    acc_limit = 64 if threads <= 128 else 128
+    if (bm * bn + threads - 1) // threads > acc_limit:
+        raise ValueError(f"MP31 source-only accumulator budget exceeds {acc_limit} per thread")
     if stages * (bm + bn) * bk * 2 > 160 * 1024:
         raise ValueError("MP31 shared ring exceeds 160 KiB per block")
+    if channel == "direct":
+        channel = "sync"
     if channel not in ("sync", "cp_async", "tme"):
         raise ValueError("Copy channel must be sync, cp_async or tme")
     a_shape = (k, m) if transpose_a else (m, k)
