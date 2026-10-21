@@ -25,6 +25,25 @@ probe scripts, matrices) lives in the companion repository
 | `musa: guard SQMMA register budget with actionable diagnostics` | gemm/copy | replaces a cryptic `MTCompile` register-allocation crash with an actionable error; better async-copy diagnostics |
 | `musa: revise planner rule from the rule -> measurement loop; add copy channel rule` | planner | long-K clause from the 32-shape validation loop; `recommend_copy_channel()` from MUPTI measurements |
 
+## GEMM / TME stack (2026-10-09 -> 2026-10-20)
+
+The second wave closes the gap between "the pipeline is configured" and "the
+pipeline actually runs". Ordered as the dependency chain, not chronologically.
+
+| Commit | Area | What it fixes / adds |
+| --- | --- | --- |
+| `musa: eliminate redundant shared staging` (+ completion fix) | pass | `EliminateRedundantSharedStaging` drops the extra shared-memory hop in front of `T.gemm`; finishes `IfThenElse` unwrapping and `SBlock` alloc cleanup so the pass fires on real kernels |
+| `musa: add analytical MP31 occupancy and wave efficiency prediction helpers` | planner | `predict_sqmma_occupancy()` / `predict_sqmma_wave_efficiency()` give the planner closed-form occupancy and wave quantisation instead of measured tables |
+| `musa: gate MP31 cp.async pipeline explicitly` | pipeline | `mp31_pipeline_async` attribute gates `tirx.use_async_copy` (opt-in first, still synchronous by default) |
+| `fix(musa): enable async copy injection on MP31` | pass | **root cause of the "async configured but serial in practice" bug**: `LowerTileOp` tested `TargetCudaHasAsyncCopy()` and skipped MUSA entirely; replaced by `TargetHasAsyncCopy()` |
+| `musa: auto-tile MP31 GEMM and lower rotating TME operands` | gemm | automatic tile selection for `T.gemm`, plus rotating (ring-buffer) TME operand lowering; introduces `tme_layout.py` with the 256-byte XOR layout contract check |
+| `fix(musa): route auto sqmma through explicit backend` | gemm | auto-selected SQMMA goes through the explicit backend so the planner config is honoured rather than defaulted |
+| `musa: enable TME hardware async copy lowering and barrier binding` | copy | Binds `tme_load` to `tl.mbarrier_arrive` / `tl.mbarrier_wait_parity` instead of lowering to a thread copy |
+| `musa: support dual-squad 256x128 SQMMA tiling with partitioned accumulators` | gemm | 256x128 tile spread over two squads (>=256 threads); accumulators partitioned so each thread stays within the 64 fp32 register budget |
+| `musa: reduce redundant barriers on async completion and enable threadblock swizzle` | codegen/pass | Removes the completion-time barrier that serialised the producer, adds `threadblock_swizzle.h` for L2-friendly block ordering |
+| `musa: native hardware TME swizzle lowering and remove software layout conversion` | gemm/codegen/templates | `tme_layout.py` now annotates each `tl.tileop.tma_copy` with `swizzle_granularity` (16/32/64 B taken from the SQMMA shared layout, validated against the 256-byte XOR contract); `copy.cc` maps 16 -> `__musa::SG_16B` and 32 -> `__musa::SG_32B`; `codegen_musa.cc` emits the enum; `tme.h` takes `int sg` on the 1D-5D `tme_load`. **The software `tme_sqmma_swizzle_inplace` permutation and its two global `__syncthreads()` are removed** - the layout is now done by the TME descriptor, not by a memory shuffle |
+| `fix: align planner copy channel and accumulator budget with test contract` | planner/gemm | Normalises a recommended `"direct"` copy channel to `"sync"` (what `make_sqmma_gemm` actually validates) and aligns the accumulator budget with the dual-squad contract |
+
 ## Measured outcomes (S5000, MUSA 5.2.0)
 
 * operator matrix (29 specs, device): 29/29 pass, no regressions
@@ -37,6 +56,29 @@ probe scripts, matrices) lives in the companion repository
 * MP31 SQMMA legality: tiles needing >64 fp32 accumulators per thread on
   large native shapes are refused with a clear message instead of crashing
   the device compiler
+
+### GEMM 2048x4096x4096 FP16 (tile 128x128x64, 256 threads, TME, 2 stages)
+
+Device receipts in `tilelang-musa-work`, `compiler_baseline/results/`:
+
+| Run | Layout path | Median | TFLOPS | vs muBLAS | Correctness |
+| --- | --- | --- | --- | --- | --- |
+| `musagen_s5000_e2e_20261016_run9` | software `tme_sqmma_swizzle_inplace` | 0.766 ms | 89.71 | 29.46% | `max_abs_error` 0.0 |
+| `musagen_s5000_e2e_20261020_run10` | hardware TME swizzle (`SG_16B/32B`) | 0.3938 ms | 174.50 | 55.64% | `max_abs_error` 0.0 |
+| `musagen_evolution` best (G6) | run10 + agent-written epilogue | 0.3832 ms | 179.31 | 58.67% | `max_abs_error` 4.88e-4 |
+
+Reading notes:
+
+* **Compare TFLOPS, not percentages.** muBLAS itself measured between 239 and
+  314 TFLOPS across these sessions (shared device, clock variation), so the
+  ratio moves even when our kernel is unchanged.
+* The 89.71 -> 174.50 step is the compiler stack (hardware swizzle lowering);
+  the agent contribution on top is +4.81 TFLOPS over 7 generations, of which
+  only generations 2, 5 and 6 improved (1, 3, 4 and 7 regressed and were kept
+  out of the record).
+* The project target for this shape is >=85% of muBLAS. Current best is
+  ~58%, i.e. the remaining gap is performance engineering, not correctness or
+  missing lowering.
 
 ## Building
 
