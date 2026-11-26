@@ -1,7 +1,7 @@
 """MUSA-specific transformation frontends."""
 
 from .. import _ffi_api
-from .legalize_gemm import legalize_fragment_a_gemm
+from .legalize_gemm import legalize_fragment_a_gemm, legalize_int8_fp32_gemm
 from .membound_opt import optimize_musa_membound
 from .smem_guard import verify_mp31_shared_memory_limit
 
@@ -38,6 +38,7 @@ __all__ = [
     "LowerPartialThreadSync",
     "ProducerConsumerWarpSpecialized",
     "legalize_fragment_a_gemm",
+    "legalize_int8_fp32_gemm",
     "optimize_musa_membound",
     "verify_mp31_shared_memory_limit",
 ]
