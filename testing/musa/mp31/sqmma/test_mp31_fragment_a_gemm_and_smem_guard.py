@@ -212,6 +212,73 @@ def test_mp31_per_squad_partial_barrier_in_multi_squad_fa():
 
 
 @tilelang.testing.requires_musa_compute_version_eq(3, 1)
+def test_mp31_ws_consumer_multi_warp_reduce_partial_barrier():
+    # 1) Square 256T WS FlashAttention: NumWarpN=2 forces multi-warp T.reduce_max
+    #    and T.reduce_sum inside the 256T WS consumer branch. Without lowering
+    #    AllReduce to MP31PartialBarrier, __syncthreads() deadlocks against the
+    #    128T TME producer.
+    B, H, S, D = 1, 2, 256, 64
+    q = torch.randn((B, S, H, D), dtype=torch.float16, device="musa") * 0.5
+    k = torch.randn((B, S, H, D), dtype=torch.float16, device="musa") * 0.5
+    v = torch.randn((B, S, H, D), dtype=torch.float16, device="musa") * 0.5
+    ref = F.scaled_dot_product_attention(
+        q.transpose(1, 2).float(),
+        k.transpose(1, 2).float(),
+        v.transpose(1, 2).float(),
+    ).transpose(1, 2).to(torch.float16)
+
+    prog_sq = _flash_attention_prefill(
+        B, H, S, D, block_M=128, block_N=64, threads=256,
+        policy=T.GemmWarpPolicy.Square, num_stages=2,
+    )
+    kernel_sq = tilelang.compile(
+        prog_sq,
+        out_idx=[3],
+        target={"kind": "musa", "arch": "mp_31"},
+        pass_configs={"tl.enable_fast_math": True},
+    )
+    src_sq = kernel_sq.get_kernel_source()
+    assert "tl::mp31_allreduce_" in src_sq
+    out_sq = kernel_sq(q, k, v)
+    torch.musa.synchronize()
+    torch.testing.assert_close(out_sq, ref, rtol=1e-2, atol=1e-2)
+
+    # 2) Pipelined TME+WS row reduction using WarpFirstAllReduce across all 256
+    #    consumer threads (scale=1, reducing_threads=256).
+    M, N, K_TILES = 16, 1024, 4
+    TILE_N = N // K_TILES
+
+    @T.prim_func
+    def ws_pipelined_row_sum(
+        X: T.Tensor((M, N), "float32"),
+        Y: T.Tensor((M,), "float32"),
+    ):
+        with T.Kernel(M, threads=256) as bx:
+            Xs = T.alloc_shared((1, TILE_N), "float32")
+            Xf = T.alloc_fragment((1, TILE_N), "float32")
+            Acc = T.alloc_fragment((1,), "float32")
+            T.clear(Acc)
+            for k in T.Pipelined(K_TILES, num_stages=2):
+                T.copy(X[bx : bx + 1, k * TILE_N : (k + 1) * TILE_N], Xs)
+                T.copy(Xs, Xf)
+                T.reduce_sum(Xf, Acc, dim=1, clear=False)
+            T.copy(Acc, Y[bx : bx + 1])
+
+    kernel_row = tilelang.compile(
+        ws_pipelined_row_sum,
+        out_idx=[1],
+        target={"kind": "musa", "arch": "mp_31"},
+    )
+    src_row = kernel_row.get_kernel_source()
+    assert "tl::mp31_allreduce_" in src_row
+    assert "WarpFirstAllReduce" in src_row
+    x = torch.randn((M, N), dtype=torch.float32, device="musa")
+    y = kernel_row(x)
+    torch.musa.synchronize()
+    torch.testing.assert_close(y.cpu(), x.cpu().sum(dim=1), rtol=1e-4, atol=1e-4)
+
+
+@tilelang.testing.requires_musa_compute_version_eq(3, 1)
 def test_mp31_fragment_a_gemm_disable_flag_fails_loudly():
     prog = _flash_attention_prefill(1, 1, 128, 64, block_M=64, block_N=64, threads=128)
     with pytest.raises(Exception):

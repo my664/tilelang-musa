@@ -1268,8 +1268,12 @@ void CodeGenMUSA::PrintCallExtern(Type ret_type, ffi::String global_symbol,
   }
   const std::string sym = static_cast<std::string>(global_symbol);
   if (sym.rfind("tl::AllReduce<", 0) == 0 ||
-      sym.rfind("tl::WarpFirstAllReduce<", 0) == 0) {
+      sym.rfind("tl::WarpFirstAllReduce<", 0) == 0 ||
+      sym.rfind("tl::mp31_allreduce_", 0) == 0) {
     need_reduce_h_ = true;
+  }
+  if (sym.rfind("tl::mp31_allreduce_", 0) == 0) {
+    need_mp31_tme_h_ = true;
   }
   if (static_cast<std::string>(global_symbol).rfind("tl::CumSum", 0) == 0 ||
       static_cast<std::string>(global_symbol).rfind("tl::CumMax", 0) == 0) {
