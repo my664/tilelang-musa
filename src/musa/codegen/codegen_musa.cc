@@ -2798,30 +2798,28 @@ void CodeGenMUSA::PrintVecElemLoadExpr(DataType t, int i,
 
 void CodeGenMUSA::VisitExpr_(const MinNode *op, std::ostream &os) {
   DataType t = op->dtype;
-  if (t.is_float() && t.is_scalar()) {
-    if (t.bits() == 32) {
-      os << "fminf(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
-      return;
+  if (t.is_float() && (t.bits() == 32 || t.bits() == 64)) {
+    const char *fn = t.bits() == 32 ? "fminf" : "fmin";
+    if (t.is_scalar()) {
+      os << fn << "(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+    } else {
+      PrintVecBinaryOp(fn, t, op->a, op->b, os);
     }
-    if (t.bits() == 64) {
-      os << "fmin(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
-      return;
-    }
+    return;
   }
   CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenMUSA::VisitExpr_(const MaxNode *op, std::ostream &os) {
   DataType t = op->dtype;
-  if (t.is_float() && t.is_scalar()) {
-    if (t.bits() == 32) {
-      os << "fmaxf(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
-      return;
+  if (t.is_float() && (t.bits() == 32 || t.bits() == 64)) {
+    const char *fn = t.bits() == 32 ? "fmaxf" : "fmax";
+    if (t.is_scalar()) {
+      os << fn << "(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+    } else {
+      PrintVecBinaryOp(fn, t, op->a, op->b, os);
     }
-    if (t.bits() == 64) {
-      os << "fmax(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
-      return;
-    }
+    return;
   }
   CodeGenC::VisitExpr_(op, os);
 }
