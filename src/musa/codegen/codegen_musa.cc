@@ -375,7 +375,12 @@ void CodeGenMUSA::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {
     if (extractor.min_blocks_per_sm.has_value()) {
       os << " __launch_bounds__(" << threadIdx_ext_int->value << ", "
          << *extractor.min_blocks_per_sm << ")";
-    } else {
+    } else if (threadIdx_ext_int->value > 256) {
+      // On MP31/mcc 5.2.0, omitting __launch_bounds__ for <=256-thread blocks
+      // keeps the default 128-VGPR/thread budget (2+ CTAs/SM) and avoids a
+      // backend fence-coalescing ICE on 128T cp_async_gs+SQMMA kernels, while
+      // >256-thread blocks (384T/512T/640T) need __launch_bounds__(threads)
+      // to avoid register-budget ICEs.
       os << " __launch_bounds__(" << threadIdx_ext_int->value << ")";
     }
   }

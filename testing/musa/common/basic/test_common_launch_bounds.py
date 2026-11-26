@@ -8,7 +8,31 @@ import tilelang.testing
 tilelang.disable_cache()
 
 
-def test_musa_default_launch_bounds():
+def test_musa_default_launch_bounds_high_threads():
+    @tilelang.jit(target="musa")
+    def kernel(n: int = 1024):
+        @T.prim_func
+        def main(A: T.Tensor((n,), "float32"), B: T.Tensor((n,), "float32")):
+            with T.Kernel(T.ceildiv(n, 512), threads=512) as bx:
+                for i in T.Parallel(512):
+                    idx = bx * 512 + i
+                    if idx < n:
+                        B[idx] = A[idx] + 1.0
+
+        return main
+
+    compiled = kernel()
+    src = compiled.get_kernel_source()
+    assert "__launch_bounds__(512)" in src
+
+    a = torch.randn(1024, device="musa", dtype=torch.float32)
+    b = torch.empty_like(a)
+    compiled(a, b)
+    torch.musa.synchronize()
+    torch.testing.assert_close(b, a + 1.0)
+
+
+def test_musa_default_launch_bounds_low_threads_omitted():
     @tilelang.jit(target="musa")
     def kernel(n: int = 1024):
         @T.prim_func
@@ -23,7 +47,7 @@ def test_musa_default_launch_bounds():
 
     compiled = kernel()
     src = compiled.get_kernel_source()
-    assert "__launch_bounds__(256)" in src
+    assert "__launch_bounds__" not in src
 
     a = torch.randn(1024, device="musa", dtype=torch.float32)
     b = torch.empty_like(a)
