@@ -95,6 +95,45 @@ def test_mp31_fragment_a_gemm_flash_attention_e2e():
 
 
 @tilelang.testing.requires_musa_compute_version_eq(3, 1)
+def test_mp31_fragment_a_gemm_flash_attention_ws_pipeline_and_fast_math():
+    B, H, S, D = 1, 2, 256, 64
+    prog = _flash_attention_prefill(B, H, S, D, block_M=64, block_N=64, threads=128)
+    kernel = tilelang.compile(
+        prog,
+        out_idx=[3],
+        target={"kind": "musa", "arch": "mp_31"},
+        pass_configs={"tl.enable_fast_math": True},
+    )
+    src = kernel.get_kernel_source()
+    assert "fmaxf(" in src
+    assert "acc_s_cast_gemm_a_staging" in src
+    # Verify unmerged producer releases K's forward barrier before waiting on V's bp barrier.
+    else_idx = src.rfind("} else {")
+    assert else_idx != -1
+    prod_src = src[else_idx:]
+    k_load_pos = prod_src.find("K_desc")
+    v_load_pos = prod_src.find("V_desc")
+    assert 0 <= k_load_pos < v_load_pos
+    between_kv = prod_src[k_load_pos:v_load_pos]
+    assert "tme_barrier_arrive" in between_kv, (
+        "Expected K forward barrier arrive before V load/bp-wait in unmerged WS producer"
+    )
+
+    q = torch.randn((B, S, H, D), dtype=torch.float16, device="musa") * 0.5
+    k = torch.randn((B, S, H, D), dtype=torch.float16, device="musa") * 0.5
+    v = torch.randn((B, S, H, D), dtype=torch.float16, device="musa") * 0.5
+    out = kernel(q, k, v)
+    torch.musa.synchronize()
+
+    ref = F.scaled_dot_product_attention(
+        q.transpose(1, 2).float(),
+        k.transpose(1, 2).float(),
+        v.transpose(1, 2).float(),
+    ).transpose(1, 2).to(torch.float16)
+    torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
+
+
+@tilelang.testing.requires_musa_compute_version_eq(3, 1)
 def test_mp31_fragment_a_gemm_disable_flag_fails_loudly():
     prog = _flash_attention_prefill(1, 1, 128, 64, block_M=64, block_N=64, threads=128)
     with pytest.raises(Exception):

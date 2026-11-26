@@ -189,9 +189,11 @@ TL_DEVICE void sqmma_ss(const void *a, const void *b, void *c,
       const int atom_index = inst_n * kInstCountM + inst_m;
       CElement *atom_c = c_base + atom_index * kCElementsPerThread;
       Accumulator accum;
+      if (!clear_accum) {
 #pragma unroll
-      for (int i = 0; i < kCElementsPerThread; ++i) {
-        accum.x[i] = atom_c[i];
+        for (int i = 0; i < kCElementsPerThread; ++i) {
+          accum.x[i] = atom_c[i];
+        }
       }
 
 #pragma unroll

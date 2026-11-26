@@ -27,6 +27,7 @@
 #include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/transform.h>
 #include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/index_map.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -2763,6 +2764,36 @@ void CodeGenMUSA::PrintVecElemLoadExpr(DataType t, int i,
   return;
 }
 
+void CodeGenMUSA::VisitExpr_(const MinNode *op, std::ostream &os) {
+  DataType t = op->dtype;
+  if (t.is_float() && t.is_scalar()) {
+    if (t.bits() == 32) {
+      os << "fminf(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+      return;
+    }
+    if (t.bits() == 64) {
+      os << "fmin(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+      return;
+    }
+  }
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenMUSA::VisitExpr_(const MaxNode *op, std::ostream &os) {
+  DataType t = op->dtype;
+  if (t.is_float() && t.is_scalar()) {
+    if (t.bits() == 32) {
+      os << "fmaxf(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+      return;
+    }
+    if (t.bits() == 64) {
+      os << "fmax(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+      return;
+    }
+  }
+  CodeGenC::VisitExpr_(op, os);
+}
+
 std::string MTCompile(const std::string &code, const Target &target) {
   static std::atomic<uint64_t> counter{0};
 
@@ -2810,6 +2841,12 @@ std::string MTCompile(const std::string &code, const Target &target) {
   args.push_back("--cuda-device-only");
   args.push_back("--cuda-gpu-arch=" + std::string(arch.value()));
   args.push_back("-O3");
+
+  auto pass_ctx = tvm::transform::PassContext::Current();
+  if (pass_ctx.defined() &&
+      pass_ctx->GetConfig<Bool>(tl::kEnableFastMath, Bool(false)).value()) {
+    args.push_back("-ffast-math");
+  }
 
   if (const char *extra_env = std::getenv("TVM_MUSA_FLAGS")) {
     std::istringstream flags_stream(extra_env);
