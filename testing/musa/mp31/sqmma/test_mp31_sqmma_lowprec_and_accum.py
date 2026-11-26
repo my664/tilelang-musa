@@ -84,6 +84,9 @@ def test_mp31_sqmma_w4a16_native_int4(a_dtype, torch_a, atol):
     kernel = tilelang.compile(gemm, out_idx=[2], target={"kind": "musa", "arch": "mp_31"})
     src = kernel.get_kernel_source()
     assert "tl::sqmma::s4" in src
+    assert "B_desc" in src
+    assert src.count("tl::tme_load(") == 2
+    assert "__launch_bounds__(384)" in src
 
     A = torch.randint(-3, 4, (M, K), device="musa", dtype=torch.int8).to(torch_a)
     B_unpacked = torch.randint(-7, 7, (N, K), device="musa", dtype=torch.int8)
